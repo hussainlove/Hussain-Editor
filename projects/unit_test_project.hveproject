@@ -1,0 +1,79 @@
+{
+  "id": "proj_unit_1",
+  "name": "Unit Test Project",
+  "aspectRatio": "16:9",
+  "resolution": "1920x1080",
+  "fps": 30,
+  "tracks": [
+    {
+      "id": "track-v1",
+      "name": "V1",
+      "type": "video",
+      "locked": false,
+      "hidden": false,
+      "muted": false,
+      "solo": false
+    }
+  ],
+  "clips": [
+    {
+      "id": "clip_test_1",
+      "trackId": "track-v1",
+      "name": "Test Video Clip",
+      "type": "video",
+      "startTime": 2,
+      "duration": 8,
+      "trimStart": 0,
+      "sourceDuration": 10,
+      "positionX": 0,
+      "positionY": 0,
+      "scaleX": 100,
+      "scaleY": 100,
+      "rotation": 0,
+      "flipH": false,
+      "flipV": false,
+      "anchorX": 50,
+      "anchorY": 50,
+      "opacity": 100,
+      "blendMode": "normal",
+      "cropTop": 0,
+      "cropBottom": 0,
+      "cropLeft": 0,
+      "cropRight": 0,
+      "speed": 1,
+      "reversed": false,
+      "volume": 100,
+      "muted": false,
+      "fadeIn": 0,
+      "fadeOut": 0,
+      "pitch": 0,
+      "noiseReduction": false,
+      "effects": [],
+      "filterPreset": "None",
+      "transitionIn": {
+        "type": "None",
+        "duration": 0
+      },
+      "transitionOut": {
+        "type": "None",
+        "duration": 0
+      },
+      "animationIn": "None",
+      "animationOut": "None",
+      "adjustments": {
+        "brightness": 0,
+        "contrast": 0,
+        "saturation": 0,
+        "exposure": 0,
+        "temperature": 0,
+        "tint": 0,
+        "highlights": 0,
+        "shadows": 0,
+        "sharpness": 0,
+        "vignette": 0
+      },
+      "keyframes": [],
+      "filePath": "/cache/uploads/reference_only.mp4"
+    }
+  ]
+}

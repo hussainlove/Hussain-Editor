@@ -1,0 +1,6 @@
+{
+  "name": "Hussain Video Editor",
+  "description": "Professional nonlinear desktop video editor with multi-track timeline, real-time compositing, keyframe animation, FFmpeg engine, auto-captions, and Windows installer package.",
+  "requestFramePermissions": ["microphone"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
