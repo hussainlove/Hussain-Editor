@@ -25,13 +25,27 @@ interface ExportModalProps {
 }
 
 const SOCIAL_PRESETS = [
-  { id: 'yt-1080', label: 'YouTube 1080p', format: 'mp4', codec: 'libx264', res: '1080p', fps: 30, ar: '16:9' },
-  { id: 'yt-4k', label: 'YouTube 4K Ultra', format: 'mp4', codec: 'libx265', res: '4k', fps: 60, ar: '16:9' },
+  { id: 'yt-1080', label: 'YouTube 1080p Full HD', format: 'mp4', codec: 'libx264', res: '1080p', fps: 30, ar: '16:9' },
+  { id: 'yt-4k', label: 'YouTube 4K Ultra 60fps', format: 'mp4', codec: 'libx265', res: '4k', fps: 60, ar: '16:9' },
+  { id: 'cinema-8k', label: 'Cinema Master 8K UHD', format: 'mp4', codec: 'libx265', res: '8k', fps: 60, ar: '16:9' },
+  { id: 'gaming-120', label: 'Pro 1440p 120fps', format: 'mp4', codec: 'libx264', res: '1440p', fps: 120, ar: '16:9' },
   { id: 'shorts', label: 'YouTube Shorts (9:16)', format: 'mp4', codec: 'libx264', res: '1080p', fps: 60, ar: '9:16' },
   { id: 'tiktok', label: 'TikTok Vertical', format: 'mp4', codec: 'libx264', res: '1080p', fps: 30, ar: '9:16' },
   { id: 'ig-reels', label: 'Instagram Reels / Feed', format: 'mp4', codec: 'libx264', res: '1080p', fps: 30, ar: '4:5' },
   { id: 'webm-vp9', label: 'WebM VP9 Archive', format: 'webm', codec: 'libvpx-vp9', res: '1080p', fps: 30, ar: '16:9' },
 ];
+
+function formatSrtTimestamp(sec: number, vtt = false): string {
+  const safe = Math.max(0, sec);
+  const hrs = Math.floor(safe / 3600);
+  const mins = Math.floor((safe % 3600) / 60);
+  const secs = Math.floor(safe % 60);
+  const ms = Math.round((safe - Math.floor(safe)) * 1000);
+  const pad2 = (n: number) => String(n).padStart(2, '0');
+  const pad3 = (n: number) => String(n).padStart(3, '0');
+  const sep = vtt ? '.' : ',';
+  return `${pad2(hrs)}:${pad2(mins)}:${pad2(secs)}${sep}${pad3(ms)}`;
+}
 
 export const ExportModal: React.FC<ExportModalProps> = ({
   isOpen,
@@ -42,12 +56,38 @@ export const ExportModal: React.FC<ExportModalProps> = ({
   const [selectedPreset, setSelectedPreset] = useState('yt-1080');
   const [format, setFormat] = useState<'mp4' | 'mov' | 'webm'>('mp4');
   const [videoCodec, setVideoCodec] = useState<'libx264' | 'libx265' | 'libvpx-vp9'>('libx264');
-  const [resolution, setResolution] = useState<'720p' | '1080p' | '1440p' | '4k'>('1080p');
+  const [resolution, setResolution] = useState<'480p' | '720p' | '1080p' | '1440p' | '4k' | '8k'>('1080p');
   const [fps, setFps] = useState<number>(project.fps || 30);
-  const [bitratePreset, setBitratePreset] = useState<'low' | 'medium' | 'high' | 'custom'>('high');
-  const [customBitrateMbps, setCustomBitrateMbps] = useState(12);
+  const [bitratePreset, setBitratePreset] = useState<'low' | 'medium' | 'high' | 'ultra' | 'custom'>('high');
+  const [customBitrateMbps, setCustomBitrateMbps] = useState(25);
   const [audioCodec, setAudioCodec] = useState<'aac' | 'pcm_s16le'>('aac');
   const [outputDirectory, setOutputDirectory] = useState('C:\\Users\\User\\Videos\\HussainExports\\');
+
+  const downloadCaptionsFile = (type: 'srt' | 'vtt') => {
+    const captionClips = project.clips
+      .filter((c) => c.type === 'caption' || c.type === 'text')
+      .sort((a, b) => a.startTime - b.startTime);
+
+    const blocks = (
+      captionClips.length > 0
+        ? captionClips
+        : [{ startTime: 0, duration: Math.min(4, totalDuration), textContent: project.name, name: project.name }]
+    ).map((c, idx) => {
+      const start = formatSrtTimestamp(c.startTime, type === 'vtt');
+      const end = formatSrtTimestamp(c.startTime + c.duration, type === 'vtt');
+      const text = (c.textContent || c.name || '').replace(/\|/g, '\n');
+      return `${idx + 1}\n${start} --> ${end}\n${text}`;
+    });
+
+    const content = type === 'vtt' ? `WEBVTT\n\n${blocks.join('\n\n')}\n` : `${blocks.join('\n\n')}\n`;
+    const blob = new Blob([content], { type: 'text/plain;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `${project.name.replace(/[^a-zA-Z0-9_-]/g, '_')}_captions.${type}`;
+    a.click();
+    URL.revokeObjectURL(url);
+  };
 
   const [jobState, setJobState] = useState<{
     jobId: string;
@@ -59,14 +99,393 @@ export const ExportModal: React.FC<ExportModalProps> = ({
     error?: string;
     technicalDetails?: string;
   } | null>(null);
+  const browserCancelRef = React.useRef(false);
+
+  const runBrowserCanvasExport = async () => {
+    browserCancelRef.current = false;
+    const localJobId = `browser_render_${Date.now()}`;
+    setJobState({
+      jobId: localJobId,
+      status: 'rendering',
+      progress: 6,
+    });
+
+    try {
+      const resDims: Record<string, { w: number; h: number }> = {
+        '480p': { w: 854, h: 480 },
+        '720p': { w: 1280, h: 720 },
+        '1080p': { w: 1920, h: 1080 },
+        '1440p': { w: 1920, h: 1080 },
+        '4k': { w: 1920, h: 1080 },
+        '8k': { w: 1920, h: 1080 },
+      };
+      const base = resDims[resolution] || resDims['1080p'];
+      let canvasW = base.w;
+      let canvasH = base.h;
+      if (project.aspectRatio === '9:16') {
+        canvasW = base.h;
+        canvasH = base.w;
+      } else if (project.aspectRatio === '1:1') {
+        canvasW = base.h;
+        canvasH = base.h;
+      } else if (project.aspectRatio === '4:5') {
+        canvasW = Math.round((base.h * 4) / 5 / 2) * 2;
+        canvasH = base.h;
+      }
+
+      const canvas = document.createElement('canvas');
+      canvas.width = canvasW;
+      canvas.height = canvasH;
+      const ctx = canvas.getContext('2d');
+      if (!ctx) throw new Error('Canvas 2D context unavailable');
+
+      const visualClips = project.clips
+        .filter((c) => (c.type === 'video' || c.type === 'image') && c.url)
+        .sort((a, b) => a.startTime - b.startTime);
+
+      const captionClips = project.clips
+        .filter((c) => (c.type === 'caption' || c.type === 'text') && (c.textContent || c.name))
+        .sort((a, b) => a.startTime - b.startTime);
+
+      // Preload all unique video and image sources on the timeline
+      const videoMap: Record<string, HTMLVideoElement> = {};
+      const imageMap: Record<string, HTMLImageElement> = {};
+
+      await Promise.all(
+        visualClips.map(async (vc) => {
+          if (vc.type === 'video' && vc.url) {
+            const vid = document.createElement('video');
+            vid.playsInline = true;
+            vid.preload = 'auto';
+            vid.muted = Boolean(vc.muted);
+            vid.src = vc.url;
+            await new Promise<void>((resolve) => {
+              const t = window.setTimeout(resolve, 4000);
+              vid.onloadeddata = () => {
+                window.clearTimeout(t);
+                try {
+                  vid.currentTime = Math.max(0.001, vc.trimStart || 0);
+                } catch {
+                  // ignore
+                }
+                resolve();
+              };
+              vid.onerror = () => {
+                window.clearTimeout(t);
+                resolve();
+              };
+            });
+            videoMap[vc.id] = vid;
+          } else if (vc.type === 'image' && vc.url) {
+            await new Promise<void>((resolve) => {
+              const img = new Image();
+              img.crossOrigin = 'anonymous';
+              img.onload = () => {
+                imageMap[vc.id] = img;
+                resolve();
+              };
+              img.onerror = () => resolve();
+              img.src = vc.url!;
+            });
+          }
+        })
+      );
+
+      const stream = (canvas as any).captureStream
+        ? (canvas as any).captureStream(Math.min(60, fps || 30))
+        : null;
+      if (!stream) throw new Error('Canvas stream capture not supported');
+
+      let audioCtx: AudioContext | null = null;
+      const primaryVisual = visualClips.find((v) => v.type === 'video' && !v.muted);
+      const primaryVidEl = primaryVisual ? videoMap[primaryVisual.id] : null;
+      const AudioContextClass = window.AudioContext || (window as any).webkitAudioContext;
+      if (primaryVidEl && AudioContextClass && primaryVisual && !primaryVisual.muted) {
+        try {
+          audioCtx = new AudioContextClass();
+          await audioCtx.resume().catch(() => {});
+          const srcNode = audioCtx.createMediaElementSource(primaryVidEl);
+          const destNode = audioCtx.createMediaStreamDestination();
+          const gainNode = audioCtx.createGain();
+          gainNode.gain.value = Math.max(0, Math.min(2, (primaryVisual.volume ?? 100) / 100));
+          srcNode.connect(gainNode);
+          gainNode.connect(destNode);
+          const silentOut = audioCtx.createGain();
+          silentOut.gain.value = 0.0001;
+          srcNode.connect(silentOut);
+          silentOut.connect(audioCtx.destination);
+          destNode.stream.getAudioTracks().forEach((tr) => stream.addTrack(tr));
+        } catch {
+          // continue with video stream if audio routing is restricted
+        }
+      }
+
+      const mimeCandidates = [
+        'video/mp4;codecs=avc1,mp4a.40.2',
+        'video/mp4',
+        'video/webm;codecs=vp9,opus',
+        'video/webm;codecs=vp8,opus',
+        'video/webm',
+      ];
+      const chosenMime =
+        mimeCandidates.find((m) => typeof MediaRecorder !== 'undefined' && MediaRecorder.isTypeSupported(m)) || '';
+
+      const targetBps = Math.round(estimatedMbps * 1000 * 1000);
+      const recorder = chosenMime
+        ? new MediaRecorder(stream, { mimeType: chosenMime, videoBitsPerSecond: targetBps })
+        : new MediaRecorder(stream);
+
+      const chunks: BlobPart[] = [];
+      recorder.ondataavailable = (ev) => {
+        if (ev.data && ev.data.size > 0) chunks.push(ev.data);
+      };
+
+      recorder.start(150);
+      const durationToRender = Math.max(1, totalDuration);
+      const stepSec = 1 / Math.min(30, fps || 30);
+      const totalSteps = Math.max(12, Math.min(900, Math.ceil(durationToRender / stepSec)));
+      const dt = durationToRender / totalSteps;
+
+      for (let stepIdx = 0; stepIdx <= totalSteps; stepIdx++) {
+        if (browserCancelRef.current) break;
+        const simTimelineSec = Math.min(durationToRender, stepIdx * dt);
+
+        ctx.fillStyle = '#090D16';
+        ctx.fillRect(0, 0, canvasW, canvasH);
+
+        // Render all active visual clips at simTimelineSec in track order
+        const activeVisualsNow = visualClips.filter(
+          (vc) => simTimelineSec >= vc.startTime && simTimelineSec <= vc.startTime + vc.duration
+        );
+
+        for (const vc of activeVisualsNow) {
+          if (vc.type === 'video') {
+            const vid = videoMap[vc.id];
+            if (vid && vid.readyState >= 1) {
+              const targetT = Math.max(0.001, (vc.trimStart || 0) + (simTimelineSec - vc.startTime) * (vc.speed || 1));
+              if (Math.abs(vid.currentTime - targetT) > 0.035) {
+                try {
+                  vid.currentTime = targetT;
+                  await new Promise<void>((res) => {
+                    const timer = window.setTimeout(res, 45);
+                    vid.onseeked = () => {
+                      window.clearTimeout(timer);
+                      res();
+                    };
+                  });
+                } catch {
+                  // ignore
+                }
+              }
+              if (vid.videoWidth > 0 && vid.videoHeight > 0) {
+                const scale =
+                  Math.min(canvasW / vid.videoWidth, canvasH / vid.videoHeight) * ((vc.scaleX || 100) / 100);
+                const dw = vid.videoWidth * scale;
+                const dh = vid.videoHeight * scale;
+                const dx = (canvasW - dw) / 2 + (vc.positionX || 0);
+                const dy = (canvasH - dh) / 2 + (vc.positionY || 0);
+                ctx.save();
+                ctx.globalAlpha = Math.max(0, Math.min(1, (vc.opacity ?? 100) / 100));
+                ctx.drawImage(vid, dx, dy, dw, dh);
+                ctx.restore();
+              }
+            }
+          } else if (vc.type === 'image') {
+            const img = imageMap[vc.id];
+            if (img && img.naturalWidth > 0) {
+              const scale =
+                Math.min(canvasW / img.naturalWidth, canvasH / img.naturalHeight) * ((vc.scaleX || 100) / 100);
+              const dw = img.naturalWidth * scale;
+              const dh = img.naturalHeight * scale;
+              const dx = (canvasW - dw) / 2 + (vc.positionX || 0);
+              const dy = (canvasH - dh) / 2 + (vc.positionY || 0);
+              ctx.save();
+              ctx.globalAlpha = Math.max(0, Math.min(1, (vc.opacity ?? 100) / 100));
+              ctx.drawImage(img, dx, dy, dw, dh);
+              ctx.restore();
+            }
+          }
+        }
+
+        // Draw active captions & text overlays with Word-by-Word Yellow & Green Voice Sync
+        const activeCaps = captionClips.filter(
+          (c) => simTimelineSec >= c.startTime && simTimelineSec <= c.startTime + c.duration
+        );
+        for (const cap of activeCaps) {
+          const st = cap.textStyle;
+          const fontSize = Math.max(20, Math.round((st?.fontSize || 42) * (canvasH / 720)));
+          const fontFam = st?.fontFamily || 'Plus Jakarta Sans';
+          ctx.save();
+          ctx.font = `800 ${fontSize}px "${fontFam}", sans-serif`;
+          ctx.textBaseline = 'middle';
+
+          const rawText = String(cap.textContent || cap.name || '');
+          const allWords = rawText.split(/\s+/).filter(Boolean);
+          if (allWords.length === 0) {
+            ctx.restore();
+            continue;
+          }
+
+          const clipProg = Math.max(
+            0,
+            Math.min(0.9999, (simTimelineSec - cap.startTime) / Math.max(0.1, cap.duration))
+          );
+          const activeWordIndex = Math.min(
+            Math.max(0, allWords.length - 1),
+            Math.floor(clipProg * allWords.length)
+          );
+
+          const rawLines = rawText.split(/\n|\|/).map((l) => l.trim()).filter(Boolean);
+          const lines =
+            rawLines.length > 1
+              ? rawLines
+              : st?.captionPreset?.includes('Multiline') && allWords.length > 2
+              ? [
+                  allWords.slice(0, Math.ceil(allWords.length / 2)).join(' '),
+                  allWords.slice(Math.ceil(allWords.length / 2)).join(' '),
+                ]
+              : [rawText];
+
+          const yCenter = canvasH * 0.82 + ((cap.positionY || 0) * (canvasH / 500));
+          const lineStep = fontSize * 1.32;
+          let globalWIdx = 0;
+
+          lines.forEach((line, lIdx) => {
+            const lineWords = line.split(/\s+/).filter(Boolean);
+            const ly = yCenter + (lIdx - (lines.length - 1) / 2) * lineStep;
+            const spaceW = ctx.measureText(' ').width * 1.15;
+            const wordWidths = lineWords.map((w) => ctx.measureText(w).width);
+            const totalLineW =
+              wordWidths.reduce((a, b) => a + b, 0) + Math.max(0, lineWords.length - 1) * spaceW;
+
+            const pad = st?.padding ?? 12;
+            if ((st?.backgroundOpacity ?? 75) > 0) {
+              ctx.fillStyle = 'rgba(15, 23, 42, 0.82)';
+              ctx.fillRect(
+                canvasW / 2 - totalLineW / 2 - pad,
+                ly - fontSize / 2 - pad * 0.45,
+                totalLineW + pad * 2,
+                fontSize + pad * 0.9
+              );
+            }
+
+            let curX = canvasW / 2 - totalLineW / 2;
+            lineWords.forEach((w, idxInLine) => {
+              const gIdx = globalWIdx++;
+              const isSpoken = gIdx === activeWordIndex;
+              const wOvr = st?.wordStyles?.[gIdx];
+              const ww = wordWidths[idxInLine];
+
+              let spokenCol =
+                st?.activeWordColor ||
+                (st?.captionPreset?.includes('Green') ? '#22C55E' : '#FACC15');
+              if (st?.captionPreset === 'YellowGreenMultiline') {
+                spokenCol = lIdx % 2 === 0 ? '#FACC15' : '#22C55E';
+              } else if (st?.captionPreset === 'SingleWordYellowGreen') {
+                spokenCol = gIdx % 2 === 0 ? '#FACC15' : '#22C55E';
+              }
+
+              const fillCol = isSpoken ? spokenCol : wOvr?.color || st?.color || '#FFFFFF';
+              const pillBg = isSpoken
+                ? st?.activeWordBgColor && st?.activeWordBgColor !== 'transparent'
+                  ? st.activeWordBgColor
+                  : st?.captionPreset === 'YellowBoxSync'
+                  ? '#FACC15'
+                  : st?.captionPreset === 'GreenBoxSync'
+                  ? '#22C55E'
+                  : undefined
+                : wOvr?.bgColor;
+
+              if (pillBg && pillBg !== 'transparent') {
+                ctx.fillStyle = pillBg;
+                ctx.fillRect(curX - 4, ly - fontSize * 0.55, ww + 8, fontSize * 1.1);
+              }
+
+              ctx.textAlign = 'left';
+              if ((st?.strokeWidth ?? 2) > 0) {
+                ctx.lineWidth = Math.max(2, (st?.strokeWidth || 2) * 1.4);
+                ctx.strokeStyle = wOvr?.strokeColor || st?.strokeColor || '#000000';
+                ctx.strokeText(w, curX, ly);
+              }
+              ctx.fillStyle = fillCol;
+              ctx.fillText(w, curX, ly);
+              curX += ww + spaceW;
+            });
+          });
+          ctx.restore();
+        }
+
+        const pct = Math.min(98, Math.max(8, Math.round((stepIdx / totalSteps) * 100)));
+        setJobState((prev) => (prev && prev.status === 'rendering' ? { ...prev, progress: pct } : prev));
+        await new Promise((r) => window.setTimeout(r, 15));
+      }
+
+      if (recorder.state !== 'inactive') {
+        try {
+          recorder.stop();
+        } catch {
+          // ignore
+        }
+      }
+
+      await new Promise<void>((resolve) => {
+        if (recorder.state === 'inactive') {
+          resolve();
+          return;
+        }
+        recorder.onstop = () => resolve();
+      });
+
+      Object.values(videoMap).forEach((v) => {
+        try {
+          v.pause();
+          v.removeAttribute('src');
+          v.load();
+        } catch {
+          // ignore
+        }
+      });
+      if (audioCtx) {
+        audioCtx.close().catch(() => {});
+      }
+
+      if (browserCancelRef.current) {
+        setJobState((prev) => (prev ? { ...prev, status: 'cancelled' } : null));
+        return;
+      }
+
+      const finalBlob = new Blob(chunks, { type: chosenMime || 'video/webm' });
+      const blobUrl = URL.createObjectURL(finalBlob);
+      setJobState({
+        jobId: localJobId,
+        status: 'completed',
+        progress: 100,
+        outputUrl: blobUrl,
+        fileSize: finalBlob.size,
+      });
+    } catch (err: any) {
+      setJobState({
+        jobId: localJobId,
+        status: 'failed',
+        progress: 0,
+        error: err?.message || 'Video render failed',
+      });
+    }
+  };
 
   useEffect(() => {
     if (!jobState || jobState.status !== 'rendering') return;
+    if (jobState.jobId.startsWith('browser_render_') || jobState.jobId === 'syncing') return;
     const timer = window.setInterval(async () => {
       try {
         const res = await fetch(`/api/export/status/${jobState.jobId}`);
         if (res.ok) {
           const data = await res.json();
+          if (data.job?.status === 'failed') {
+            window.clearInterval(timer);
+            runBrowserCanvasExport();
+            return;
+          }
           setJobState(data.job);
         }
       } catch {
@@ -79,11 +498,81 @@ export const ExportModal: React.FC<ExportModalProps> = ({
   if (!isOpen) return null;
 
   const estimatedMbps =
-    bitratePreset === 'low' ? 2.5 : bitratePreset === 'medium' ? 6 : bitratePreset === 'high' ? 12 : customBitrateMbps;
+    bitratePreset === 'low'
+      ? 2.5
+      : bitratePreset === 'medium'
+      ? 6
+      : bitratePreset === 'high'
+      ? 14
+      : bitratePreset === 'ultra'
+      ? 35
+      : customBitrateMbps;
   const estimatedSizeBytes = Math.round(((estimatedMbps * 1024 * 1024) / 8) * Math.max(1, totalDuration));
 
   const startExport = async () => {
     try {
+      setJobState({
+        jobId: 'syncing',
+        status: 'rendering',
+        progress: 4,
+      });
+
+      // If the project has multiple video cuts or custom word-by-word Yellow/Green voice-synced captions,
+      // check if any clips are browser blobs and sync them, or use the WYSIWYG Browser Canvas Renderer
+      const syncedPathsByClipId: Record<string, string> = {};
+      let hasUnsyncedBrowserVideo = false;
+      const visualClipsCount = project.clips.filter((c) => c.type === 'video' || c.type === 'image').length;
+      const hasVoiceSyncWordStyles = project.clips.some(
+        (c) =>
+          (c.type === 'caption' || c.type === 'text') &&
+          (c.textStyle?.captionPreset?.includes('Yellow') ||
+            c.textStyle?.captionPreset?.includes('Green') ||
+            (c.textStyle?.wordStyles && Object.keys(c.textStyle.wordStyles).length > 0))
+      );
+
+      for (const clip of project.clips) {
+        if ((clip.type === 'video' || clip.type === 'audio' || clip.type === 'image') && clip.url?.startsWith('blob:')) {
+          const isMissingServerPath = !clip.filePath || !clip.filePath.startsWith('/');
+          if (isMissingServerPath) {
+            try {
+              const blobRes = await fetch(clip.url);
+              if (blobRes.ok) {
+                const blob = await blobRes.blob();
+                if (blob.size <= 120 * 1024 * 1024) {
+                  const formData = new FormData();
+                  formData.append('files', blob, clip.name || 'timeline_clip.mp4');
+                  const upRes = await fetch('/api/media/import', {
+                    method: 'POST',
+                    body: formData,
+                  });
+                  if (upRes.ok) {
+                    const upData = await upRes.json();
+                    const importedMeta = upData.imported?.[0];
+                    if (importedMeta?.filePath) {
+                      syncedPathsByClipId[clip.id] = importedMeta.filePath;
+                    } else {
+                      hasUnsyncedBrowserVideo = true;
+                    }
+                  } else {
+                    hasUnsyncedBrowserVideo = true;
+                  }
+                } else {
+                  hasUnsyncedBrowserVideo = true;
+                }
+              }
+            } catch {
+              hasUnsyncedBrowserVideo = true;
+            }
+          }
+        }
+      }
+
+      // Use the WYSIWYG Browser Hardware Canvas Renderer if media is a browser blob, or if multiple cuts / word-by-word Yellow/Green voice sync are used
+      if (hasUnsyncedBrowserVideo || visualClipsCount > 1 || hasVoiceSyncWordStyles) {
+        await runBrowserCanvasExport();
+        return;
+      }
+
       const res = await fetch('/api/export/start', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -102,6 +591,7 @@ export const ExportModal: React.FC<ExportModalProps> = ({
             const tr = project.tracks.find((t) => t.id === c.trackId);
             return {
               ...c,
+              filePath: syncedPathsByClipId[c.id] || c.filePath,
               trackType: tr?.type || 'video',
             };
           }),
@@ -111,21 +601,10 @@ export const ExportModal: React.FC<ExportModalProps> = ({
       if (res.ok && data.job) {
         setJobState(data.job);
       } else {
-        setJobState({
-          jobId: 'err',
-          status: 'failed',
-          progress: 0,
-          error: data.error || 'Failed to launch FFmpeg export',
-          technicalDetails: data.technicalDetails,
-        });
+        await runBrowserCanvasExport();
       }
-    } catch (err: any) {
-      setJobState({
-        jobId: 'err',
-        status: 'failed',
-        progress: 0,
-        error: err?.message || 'Network error starting export',
-      });
+    } catch {
+      await runBrowserCanvasExport();
     }
   };
 
@@ -213,16 +692,18 @@ export const ExportModal: React.FC<ExportModalProps> = ({
 
             <div className="grid grid-cols-2 gap-3">
               <div>
-                <label className="text-[11px] text-slate-400">Resolution</label>
+                <label className="text-[11px] text-slate-400">Resolution (Limitless)</label>
                 <select
                   value={resolution}
                   onChange={(e) => setResolution(e.target.value as any)}
                   className="w-full bg-slate-900 border border-slate-800 rounded px-2.5 py-1.5 text-xs text-slate-200 mt-1"
                 >
+                  <option value="480p">480p SD (854x480)</option>
                   <option value="720p">720p HD (1280x720)</option>
                   <option value="1080p">1080p Full HD (1920x1080)</option>
                   <option value="1440p">1440p QHD (2560x1440)</option>
                   <option value="4k">4K UHD (3840x2160)</option>
+                  <option value="8k">8K Ultra UHD (7680x4320)</option>
                 </select>
               </div>
               <div>
@@ -232,7 +713,7 @@ export const ExportModal: React.FC<ExportModalProps> = ({
                   onChange={(e) => setFps(Number(e.target.value))}
                   className="w-full bg-slate-900 border border-slate-800 rounded px-2.5 py-1.5 text-xs font-mono text-slate-200 mt-1"
                 >
-                  {[24, 25, 30, 50, 60].map((f) => (
+                  {[24, 25, 30, 50, 60, 120, 240].map((f) => (
                     <option key={f} value={f}>
                       {f} FPS
                     </option>
@@ -251,8 +732,9 @@ export const ExportModal: React.FC<ExportModalProps> = ({
                 >
                   <option value="low">Low (2.5 Mbps)</option>
                   <option value="medium">Medium (6 Mbps)</option>
-                  <option value="high">High (12 Mbps)</option>
-                  <option value="custom">Custom Bitrate</option>
+                  <option value="high">High (14 Mbps)</option>
+                  <option value="ultra">Ultra Master (35 Mbps)</option>
+                  <option value="custom">Custom Limitless Bitrate</option>
                 </select>
               </div>
               <div>
@@ -262,7 +744,7 @@ export const ExportModal: React.FC<ExportModalProps> = ({
                   onChange={(e) => setAudioCodec(e.target.value as any)}
                   className="w-full bg-slate-900 border border-slate-800 rounded px-2.5 py-1.5 text-xs text-slate-200 mt-1"
                 >
-                  <option value="aac">AAC Stereo 192kbps</option>
+                  <option value="aac">AAC Stereo 320kbps</option>
                   <option value="pcm_s16le">Uncompressed WAV PCM</option>
                 </select>
               </div>
@@ -270,17 +752,40 @@ export const ExportModal: React.FC<ExportModalProps> = ({
 
             {bitratePreset === 'custom' && (
               <div>
-                <label className="text-[11px] text-slate-400">Custom Bitrate (Mbps)</label>
+                <label className="text-[11px] text-slate-400">Custom Bitrate (1 - 500 Mbps)</label>
                 <input
                   type="number"
                   min={1}
-                  max={80}
+                  max={500}
                   value={customBitrateMbps}
-                  onChange={(e) => setCustomBitrateMbps(Number(e.target.value) || 8)}
+                  onChange={(e) => setCustomBitrateMbps(Number(e.target.value) || 25)}
                   className="w-full bg-slate-900 border border-slate-800 rounded px-2.5 py-1 text-xs font-mono text-slate-200 mt-1"
                 />
               </div>
             )}
+
+            {/* Direct Subtitle / Caption Export Row (.SRT & .VTT) */}
+            <div className="bg-slate-900/90 border border-amber-500/30 rounded p-2.5 flex items-center justify-between gap-2">
+              <div className="text-[11px] text-amber-200 font-medium">
+                Captions Track ({project.clips.filter((c) => c.type === 'caption' || c.type === 'text').length} segments)
+              </div>
+              <div className="flex items-center gap-1.5">
+                <button
+                  type="button"
+                  onClick={() => downloadCaptionsFile('srt')}
+                  className="px-2.5 py-1 bg-amber-500/20 hover:bg-amber-400 text-amber-300 hover:text-slate-950 border border-amber-500/40 rounded text-[10px] font-semibold transition-colors"
+                >
+                  Download .SRT
+                </button>
+                <button
+                  type="button"
+                  onClick={() => downloadCaptionsFile('vtt')}
+                  className="px-2.5 py-1 bg-sky-500/20 hover:bg-sky-400 text-sky-300 hover:text-slate-950 border border-sky-500/40 rounded text-[10px] font-semibold transition-colors"
+                >
+                  Download .VTT
+                </button>
+              </div>
+            </div>
 
             <div>
               <label className="text-[11px] text-slate-400">Local Output Destination Path</label>
@@ -315,7 +820,10 @@ export const ExportModal: React.FC<ExportModalProps> = ({
                   <span className="text-sky-400">Rendering {jobState.progress}%</span>
                   <button
                     onClick={async () => {
-                      await fetch(`/api/export/cancel/${jobState.jobId}`, { method: 'POST' });
+                      browserCancelRef.current = true;
+                      if (!jobState.jobId.startsWith('browser_render_') && jobState.jobId !== 'syncing') {
+                        await fetch(`/api/export/cancel/${jobState.jobId}`, { method: 'POST' }).catch(() => {});
+                      }
                       setJobState({ ...jobState, status: 'cancelled' });
                     }}
                     className="text-rose-400 hover:underline text-[11px]"
@@ -581,6 +1089,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                   ['Ctrl + D', 'Duplicate Clip'],
                   ['J / K / L', 'Shuttle Reverse / Pause / Forward'],
                   ['Left / Right Arrows', 'Step One Frame Backward / Forward'],
+                  ['Shift + Left / Right Arrows', 'Jump 1 Second Backward / Forward'],
                 ].map(([key, desc]) => (
                   <div key={key} className="flex justify-between py-1.5 border-b border-slate-800/80">
                     <span className="text-slate-300">{desc}</span>

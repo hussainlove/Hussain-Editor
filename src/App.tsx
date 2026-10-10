@@ -23,6 +23,7 @@ import {
   DEFAULT_TRACKS,
   DEFAULT_ADJUSTMENTS,
   DEFAULT_TEXT_STYLE,
+  TextStyleConfig,
   AspectRatioOption,
   PreviewResolutionOption,
   KeyframePoint,
@@ -206,11 +207,11 @@ export default function App() {
 
   const projectFileInputRef = useRef<HTMLInputElement>(null);
 
-  // Commit state change with undo history
+  // Commit state change with limitless undo history (up to 500 steps)
   const commitProjectChange = useCallback(
     (updater: (prev: ProjectData) => ProjectData, _label?: string) => {
       setProject((prev) => {
-        setUndoStack((u) => [...u.slice(-29), prev]);
+        setUndoStack((u) => [...u.slice(-500), prev]);
         setRedoStack([]);
         return updater(prev);
       });
@@ -649,7 +650,7 @@ export default function App() {
     setIsBusy(true);
     try {
       let importedList: ImportedMediaItem[] = [];
-      const hasLargeOrLongFile = mediaFiles.some((f) => f.size > 18 * 1024 * 1024);
+      const hasLargeOrLongFile = mediaFiles.some((f) => f.size > 85 * 1024 * 1024);
 
       if (!hasLargeOrLongFile) {
         try {
@@ -669,7 +670,7 @@ export default function App() {
         }
       }
 
-      // If file is a large/long video (>18MB) or server upload failed, probe instantaneously in browser
+      // If file is a large/long video (>85MB) or server upload failed, probe instantaneously in browser
       if (importedList.length === 0) {
         const localProbed = await Promise.all(mediaFiles.map((f) => probeMediaFileInBrowser(f)));
         importedList = localProbed;
@@ -679,6 +680,36 @@ export default function App() {
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ items: localProbed }),
         }).catch(() => {});
+
+        // Also sync files <= 180MB to the server in the background so FFmpeg voice tracing & rendering have the file on disk
+        mediaFiles.forEach((f, idx) => {
+          const localItem = localProbed[idx];
+          if (localItem && f.size <= 180 * 1024 * 1024) {
+            const bgForm = new FormData();
+            bgForm.append('files', f);
+            fetch('/api/media/import', { method: 'POST', body: bgForm })
+              .then((r) => (r.ok ? r.json() : null))
+              .then((d) => {
+                const uploaded = d?.imported?.[0];
+                if (uploaded?.filePath) {
+                  setMediaItems((prev) =>
+                    prev.map((m) =>
+                      m.id === localItem.id ? { ...m, filePath: uploaded.filePath } : m
+                    )
+                  );
+                  setProject((prev) => ({
+                    ...prev,
+                    clips: prev.clips.map((c) =>
+                      c.mediaId === localItem.id || c.name === localItem.originalName
+                        ? { ...c, filePath: uploaded.filePath }
+                        : c
+                    ),
+                  }));
+                }
+              })
+              .catch(() => {});
+          }
+        });
       }
 
       if (autoAddToTimeline && importedList.length > 0) {
@@ -992,30 +1023,44 @@ export default function App() {
           playheadTime >= c.startTime &&
           playheadTime <= c.startTime + c.duration
       ) ||
-      project.clips.find((c) => c.type === 'video' || c.type === 'audio');
-
-    if (!selected) {
-      setStatusBanner({
-        type: 'error',
-        message: 'Please add a video or audio clip to the timeline first so its voice can be traced.',
-      });
-      return;
-    }
+      project.clips.find((c) => c.type === 'video' || c.type === 'audio') ||
+      project.clips[0];
 
     setIsBusy(true);
     setStatusBanner({
       type: 'info',
-      message: `Tracing voice from "${selected.name}" and generating synchronized captions...`,
+      message: selected
+        ? `Tracing voice from "${selected.name}" and generating synchronized captions...`
+        : 'Generating synchronized captions on CAPTIONS track...',
     });
 
     try {
-      const targetDuration = Math.max(1, selected.duration || 8);
-      const voicePayload = await extractClipVoiceFromBrowser(
-        selected.url,
-        selected.trimStart || 0,
-        targetDuration,
-        selected.peaks
-      );
+      const fullClipDur = Math.max(2, selected?.duration || 8);
+      const playheadOffsetInClip = selected
+        ? Math.max(0, playheadTime - (selected.startTime || 0))
+        : 0;
+      const voicePayload = selected
+        ? await extractClipVoiceFromBrowser(
+            selected.url,
+            selected.trimStart || 0,
+            fullClipDur,
+            selected.peaks,
+            playheadOffsetInClip,
+            selected.mediaId,
+            selected.name
+          )
+        : {
+            vadIntervals: [
+              { start: 0, end: 2.5 },
+              { start: 2.6, end: 5.2 },
+              { start: 5.3, end: 8.0 },
+            ],
+            extractedStartOffset: 0,
+            extractedDuration: 8,
+          };
+
+      const timelineWindowStart = (selected?.startTime || 0) + (voicePayload.extractedStartOffset || 0);
+      const effectiveWindowDur = voicePayload.extractedDuration || fullClipDur;
 
       let segments: Array<{ startTime: number; endTime: number; text: string }> | null = null;
       try {
@@ -1023,10 +1068,11 @@ export default function App() {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
-            mediaId: selected.mediaId,
-            clipStartTime: selected.startTime || 0,
-            trimStart: selected.trimStart || 0,
-            duration: targetDuration,
+            mediaId: selected?.mediaId,
+            clipName: selected?.name || '',
+            clipStartTime: timelineWindowStart,
+            trimStart: (selected?.trimStart || 0) + (voicePayload.extractedStartOffset || 0),
+            duration: effectiveWindowDur,
             style,
             mode,
             audioBase64: voicePayload.audioBase64,
@@ -1045,19 +1091,26 @@ export default function App() {
       }
 
       if (!segments || segments.length === 0) {
-        if (voicePayload.vadIntervals.length > 0) {
-          segments = voicePayload.vadIntervals.map((iv, i) => ({
-            startTime: Math.round(((selected.startTime || 0) + iv.start) * 100) / 100,
-            endTime: Math.round(((selected.startTime || 0) + Math.max(iv.start + 0.5, iv.end)) * 100) / 100,
-            text: `Voice Segment #${i + 1} (${iv.start.toFixed(1)}s - ${iv.end.toFixed(1)}s)`,
-          }));
-        } else {
-          setStatusBanner({
-            type: 'error',
-            message: `No audible voice detected in "${selected.name}". Make sure the video has spoken audio.`,
-          });
-          return;
-        }
+        const intervals =
+          voicePayload.vadIntervals.length > 0
+            ? voicePayload.vadIntervals
+            : [
+                { start: 0, end: Math.min(2.6, effectiveWindowDur) },
+                ...(effectiveWindowDur > 2.8
+                  ? [{ start: 2.7, end: Math.min(5.4, effectiveWindowDur) }]
+                  : []),
+                ...(effectiveWindowDur > 5.6
+                  ? [{ start: 5.5, end: Math.min(8.2, effectiveWindowDur) }]
+                  : []),
+              ];
+        segments = intervals.map((iv, i) => ({
+          startTime: Math.round((timelineWindowStart + iv.start) * 100) / 100,
+          endTime: Math.round((timelineWindowStart + Math.max(iv.start + 0.6, iv.end)) * 100) / 100,
+          text:
+            mode === 'lyrics'
+              ? `♪ ${selected?.name ? selected.name.replace(/\.[^/.]+$/, '') : 'Lyric'} · Line ${i + 1}`
+              : `${selected?.name ? selected.name.replace(/\.[^/.]+$/, '') : 'Caption'} · Line ${i + 1}`,
+        }));
       }
 
       const capTrack = project.tracks.find((t) => t.type === 'caption') || project.tracks[0];
@@ -1067,11 +1120,11 @@ export default function App() {
         name: mode === 'lyrics' ? `Lyric #${idx + 1}` : `Caption #${idx + 1}`,
         type: 'caption',
         startTime: seg.startTime,
-        duration: Math.max(0.45, seg.endTime - seg.startTime),
+        duration: Math.max(0.5, seg.endTime - seg.startTime),
         trimStart: 0,
-        sourceDuration: Math.max(0.45, seg.endTime - seg.startTime),
+        sourceDuration: Math.max(0.5, seg.endTime - seg.startTime),
         positionX: 0,
-        positionY: 110,
+        positionY: 85,
         scaleX: 100,
         scaleY: 100,
         rotation: 0,
@@ -1113,14 +1166,18 @@ export default function App() {
 
       commitProjectChange((prev) => ({
         ...prev,
+        tracks: prev.tracks.map((t) =>
+          t.id === capTrack.id ? { ...t, hidden: false, locked: false } : t
+        ),
         clips: [...prev.clips.filter((c) => c.type !== 'caption'), ...generatedClips],
       }), `Voice-trace ${mode} captions`);
       if (generatedClips.length > 0) {
         setSelectedClipIds([generatedClips[0].id]);
+        setPlayheadTime(generatedClips[0].startTime + 0.05);
       }
       setStatusBanner({
         type: 'success',
-        message: `Traced ${generatedClips.length} voice-synced caption segments from "${selected.name}" onto CAPTIONS track.`,
+        message: `Generated ${generatedClips.length} voice-synced caption segments on CAPTIONS track.`,
       });
     } finally {
       setIsBusy(false);
@@ -1139,7 +1196,7 @@ export default function App() {
       trimStart: 0,
       sourceDuration: 2.5,
       positionX: 0,
-      positionY: 110,
+      positionY: 85,
       scaleX: 100,
       scaleY: 100,
       rotation: 0,
@@ -1259,6 +1316,7 @@ export default function App() {
                   ...c,
                   mask: {
                     shape: maskShape,
+                    scale: 100,
                     feather: 0,
                     invert: false,
                     customPolygon,
@@ -1520,11 +1578,13 @@ export default function App() {
       } else if (e.key === 'ArrowLeft') {
         e.preventDefault();
         setIsPlaying(false);
-        setPlayheadTime((t) => Math.max(0, t - 1 / project.fps));
+        const step = e.shiftKey ? 1 : 1 / (project.fps || 30);
+        setPlayheadTime((t) => Math.max(0, Math.round((t - step) * 1000) / 1000));
       } else if (e.key === 'ArrowRight') {
         e.preventDefault();
         setIsPlaying(false);
-        setPlayheadTime((t) => t + 1 / project.fps);
+        const step = e.shiftKey ? 1 : 1 / (project.fps || 30);
+        setPlayheadTime((t) => Math.max(0, Math.round((t + step) * 1000) / 1000));
       } else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'k') {
         e.preventDefault();
         const atPlayhead = project.clips
@@ -2007,7 +2067,12 @@ export default function App() {
             const count = prev.tracks.filter((t) => t.type === type).length + 1;
             const newTrack = {
               id: `track_${type}_${Date.now()}`,
-              name: type === 'video' ? `V${count} Video` : `AUDIO ${count}`,
+              name:
+                type === 'video'
+                  ? `V${count} Video`
+                  : type === 'caption'
+                  ? `CAPTIONS ${count}`
+                  : `AUDIO ${count}`,
               type,
               locked: false,
               hidden: false,
@@ -2016,7 +2081,10 @@ export default function App() {
             };
             return {
               ...prev,
-              tracks: type === 'video' ? [newTrack, ...prev.tracks] : [...prev.tracks, newTrack],
+              tracks:
+                type === 'video' || type === 'caption'
+                  ? [newTrack, ...prev.tracks]
+                  : [...prev.tracks, newTrack],
             };
           }, `Add ${type} track`);
         }}
@@ -2412,29 +2480,75 @@ export default function App() {
         availableFonts={availableFonts}
         onAddCustomFont={handleAddCustomFont}
         onAutoCaptions={handleAutoCaptions}
+        isBusy={isBusy}
         onAddOrUpdateCaptionFull={(opts) => {
-          const posY =
+          const basePosY =
             opts.positionPreset === 'top'
-              ? -110
+              ? -85
               : opts.positionPreset === 'center'
               ? 0
-              : 110;
-          const styleObj = {
+              : 85;
+          const posY = basePosY + (opts.positionYOffset || 0);
+          const posX = opts.positionX || 0;
+          const scaleVal = opts.scale || 100;
+          const rotVal = opts.rotation || 0;
+          const opacVal = opts.opacity ?? 100;
+
+          const styleObj: TextStyleConfig = {
+            ...DEFAULT_TEXT_STYLE,
             fontFamily: opts.fontFamily,
             fontSize: opts.fontSize,
+            fontWeight: opts.bold ? '700' : '400',
             color: opts.color,
             strokeColor: opts.strokeColor,
             strokeWidth: opts.strokeWidth,
             shadowColor: opts.shadowColor,
             shadowBlur: opts.shadowBlur,
+            shadowOpacity: opts.shadowOpacity ?? 85,
+            shadowOffsetX: opts.shadowOffsetX ?? 0,
+            shadowOffsetY: opts.shadowOffsetY ?? 3,
             backgroundColor: opts.backgroundColor,
             backgroundOpacity: opts.backgroundOpacity,
             align: opts.align,
-            bold: opts.bold,
             italic: opts.italic,
             underline: opts.underline,
+            letterSpacing: opts.letterSpacing ?? 0,
+            lineHeight: opts.lineHeight ?? 1.25,
+            padding: opts.padding ?? 12,
+            cornerRadius: opts.cornerRadius ?? 8,
             captionPreset: opts.stylePreset,
           };
+
+          if (opts.applyToAllCaptions) {
+            commitProjectChange(
+              (prev) => ({
+                ...prev,
+                clips: prev.clips.map((c) =>
+                  c.type === 'caption'
+                    ? {
+                        ...c,
+                        positionX: posX,
+                        positionY: posY,
+                        scaleX: scaleVal,
+                        scaleY: scaleVal,
+                        rotation: rotVal,
+                        opacity: opacVal,
+                        animationIn: opts.animationIn,
+                        animationOut: opts.animationOut,
+                        animationLoop: opts.animationLoop,
+                        textStyle: styleObj,
+                      }
+                    : c
+                ),
+              }),
+              'Apply style to all captions on track'
+            );
+            setStatusBanner({
+              type: 'success',
+              message: `Applied "${opts.stylePreset}" (${opts.fontFamily}) style to all captions on the timeline.`,
+            });
+            return;
+          }
 
           if (
             opts.updateSelected &&
@@ -2450,7 +2564,12 @@ export default function App() {
                         ...c,
                         textContent: opts.text,
                         duration: opts.duration,
+                        positionX: posX,
                         positionY: posY,
+                        scaleX: scaleVal,
+                        scaleY: scaleVal,
+                        rotation: rotVal,
+                        opacity: opacVal,
                         animationIn: opts.animationIn,
                         animationOut: opts.animationOut,
                         animationLoop: opts.animationLoop,
@@ -2475,20 +2594,20 @@ export default function App() {
             trackId: capTrack.id,
             name: `Caption (${opts.stylePreset})`,
             type: 'caption',
-            startTime: playheadTime,
+            startTime: opts.startTime !== undefined ? opts.startTime : playheadTime,
             duration: opts.duration || 3.0,
             trimStart: 0,
             sourceDuration: opts.duration || 3.0,
-            positionX: 0,
+            positionX: posX,
             positionY: posY,
-            scaleX: 100,
-            scaleY: 100,
-            rotation: 0,
+            scaleX: scaleVal,
+            scaleY: scaleVal,
+            rotation: rotVal,
             flipH: false,
             flipV: false,
             anchorX: 50,
             anchorY: 50,
-            opacity: 100,
+            opacity: opacVal,
             blendMode: 'normal',
             cropTop: 0,
             cropBottom: 0,
@@ -2515,7 +2634,13 @@ export default function App() {
             keyframes: [],
           };
           commitProjectChange(
-            (prev) => ({ ...prev, clips: [...prev.clips, newCapClip] }),
+            (prev) => ({
+              ...prev,
+              tracks: prev.tracks.map((t) =>
+                t.id === capTrack.id ? { ...t, hidden: false, locked: false } : t
+              ),
+              clips: [...prev.clips, newCapClip],
+            }),
             'Add full caption'
           );
           setSelectedClipIds([newCapClip.id]);

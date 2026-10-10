@@ -38,7 +38,7 @@ const storage = multer.diskStorage({
 
 const upload = multer({
   storage,
-  limits: { fileSize: 10 * 1024 * 1024 * 1024 }, // 10GB limit for long-form 4K videos
+  limits: { fileSize: Infinity }, // Limitless file size for any resolution/duration video
 });
 
 // In-memory registry persisted to projects/media_registry.json
@@ -71,7 +71,8 @@ function saveMediaRegistry(items: MediaMetadata[]) {
 
 export async function createAppServer() {
   const app = express();
-  app.use(express.json({ limit: '50mb' }));
+  app.use(express.json({ limit: '500mb' }));
+  app.use(express.urlencoded({ limit: '500mb', extended: true }));
 
   // Serve cached media files, thumbnails, waveforms, exports
   app.use('/cache', express.static(path.resolve(process.cwd(), 'cache')));
@@ -122,7 +123,7 @@ export async function createAppServer() {
   });
 
   // Upload real media files and run FFprobe inspection + thumbnail & waveform extraction
-  app.post('/api/media/import', upload.array('files', 20), async (req, res) => {
+  app.post('/api/media/import', upload.array('files'), async (req, res) => {
     try {
       const files = (req.files as Express.Multer.File[]) || [];
       if (files.length === 0) {
@@ -257,11 +258,146 @@ export async function createAppServer() {
     }
   });
 
+  // Extract 8kHz mono WAV and acoustic VAD speech intervals from a browser video/audio blob slice via FFmpeg
+  app.post('/api/captions/extract-voice-slice', upload.single('file'), async (req, res) => {
+    const file = req.file;
+    if (!file || !fs.existsSync(file.path)) {
+      res.status(400).json({ error: 'No media slice provided' });
+      return;
+    }
+    const trimStart = Math.max(0, Number(req.body?.trimStart) || 0);
+    const fullDur = Math.max(1, Number(req.body?.duration) || 30);
+    // Extract up to 150s of 8kHz mono PCM (~2.4MB WAV) for Gemini voice recognition
+    const wavExtractDur = Math.min(fullDur, 150);
+    const tmpAudioPath = path.join(
+      DIRS.waveforms,
+      `slice_voice_${Date.now()}_${Math.random().toString(36).slice(2, 6)}.wav`
+    );
+
+    try {
+      const { stderr } = await execFileAsync('ffmpeg', [
+        '-y',
+        ...(trimStart > 0 ? ['-ss', String(trimStart)] : []),
+        '-t',
+        String(wavExtractDur),
+        '-i',
+        file.path,
+        '-vn',
+        '-ac',
+        '1',
+        '-ar',
+        '8000',
+        '-acodec',
+        'pcm_s16le',
+        '-af',
+        'silencedetect=noise=-32dB:d=0.25',
+        '-f',
+        'wav',
+        tmpAudioPath,
+      ]);
+
+      let audioBase64: string | undefined;
+      if (fs.existsSync(tmpAudioPath)) {
+        const buf = fs.readFileSync(tmpAudioPath);
+        if (buf.length > 44) {
+          audioBase64 = buf.toString('base64');
+        }
+        try {
+          fs.unlinkSync(tmpAudioPath);
+        } catch {
+          // ignore
+        }
+      }
+
+      const silenceStarts: number[] = [];
+      const silenceEnds: number[] = [];
+      const startRegex = /silence_start:\s*([0-9.]+)/g;
+      const endRegex = /silence_end:\s*([0-9.]+)/g;
+      let m: RegExpExecArray | null;
+      while ((m = startRegex.exec(stderr)) !== null) {
+        silenceStarts.push(parseFloat(m[1]));
+      }
+      while ((m = endRegex.exec(stderr)) !== null) {
+        silenceEnds.push(parseFloat(m[1]));
+      }
+
+      const detectedSpeech: Array<{ start: number; end: number }> = [];
+      if (silenceStarts.length > 0 || silenceEnds.length > 0) {
+        let cursor = 0;
+        const count = Math.max(silenceStarts.length, silenceEnds.length);
+        for (let i = 0; i < count; i++) {
+          const sStart = silenceStarts[i] ?? wavExtractDur;
+          const sEnd = silenceEnds[i] ?? wavExtractDur;
+          if (sStart - cursor >= 0.25) {
+            detectedSpeech.push({
+              start: Math.round(cursor * 100) / 100,
+              end: Math.round(sStart * 100) / 100,
+            });
+          }
+          cursor = Math.max(cursor, sEnd);
+        }
+        if (wavExtractDur - cursor >= 0.25) {
+          detectedSpeech.push({
+            start: Math.round(cursor * 100) / 100,
+            end: Math.round(wavExtractDur * 100) / 100,
+          });
+        }
+      }
+
+      // Keep the uploaded file in registry if mediaId was passed so export/FFmpeg can also use it
+      const mediaId = req.body?.mediaId;
+      if (mediaId) {
+        const registry = loadMediaRegistry();
+        const idx = registry.findIndex((r) => r.id === mediaId);
+        if (idx >= 0 && (!registry[idx].filePath || !fs.existsSync(registry[idx].filePath))) {
+          registry[idx].filePath = file.path;
+          registry[idx].isOffline = false;
+          saveMediaRegistry(registry);
+        } else {
+          try {
+            fs.unlinkSync(file.path);
+          } catch {
+            // ignore
+          }
+        }
+      } else {
+        try {
+          fs.unlinkSync(file.path);
+        } catch {
+          // ignore
+        }
+      }
+
+      res.json({
+        audioBase64,
+        mimeType: 'audio/wav',
+        vadIntervals: detectedSpeech,
+      });
+    } catch (err: any) {
+      if (fs.existsSync(tmpAudioPath)) {
+        try {
+          fs.unlinkSync(tmpAudioPath);
+        } catch {
+          // ignore
+        }
+      }
+      if (fs.existsSync(file.path)) {
+        try {
+          fs.unlinkSync(file.path);
+        } catch {
+          // ignore
+        }
+      }
+      res.status(500).json({ error: err?.message || 'Slice voice extraction failed' });
+    }
+  });
+
   // Real Video/Audio Voice Tracing & Speech-to-Text / Lyrics Caption Generator
   app.post('/api/captions/auto-generate', async (req, res) => {
     try {
       const {
         mediaId,
+        clipName = '',
         clipStartTime = 0,
         trimStart = 0,
         duration = 8,
@@ -274,22 +410,58 @@ export async function createAppServer() {
 
       const registry = loadMediaRegistry();
       const source = registry.find((m) => m.id === mediaId);
-      const clipDur = Math.max(1, Number(duration) || (source ? source.duration : 8));
+      const effectiveTitle = String(clipName || source?.originalName || 'Video Sequence')
+        .replace(/\.[^/.]+$/, '')
+        .replace(/[_-]+/g, ' ')
+        .trim();
+      const clipDur = Math.max(1, Number(duration) || (source ? source.duration : 12));
       const clipTrim = Math.max(0, Number(trimStart) || 0);
       const timelineOffset = Math.max(0, Number(clipStartTime) || 0);
 
+      // Helper to split any long speech intervals (>3.4s) into natural 2.6s caption phrases (Limitless count)
+      const normalizePhraseIntervals = (
+        raw: Array<{ start: number; end: number }>,
+        maxDur: number
+      ): Array<{ start: number; end: number }> => {
+        const base =
+          Array.isArray(raw) && raw.length > 0
+            ? raw
+            : [{ start: 0, end: maxDur }];
+        const out: Array<{ start: number; end: number }> = [];
+        for (const iv of base) {
+          let cur = Math.max(0, Number(iv.start) || 0);
+          const end = Math.min(maxDur, Math.max(cur + 0.5, Number(iv.end) || cur + 2.5));
+          while (end - cur > 3.4) {
+            out.push({
+              start: Math.round(cur * 100) / 100,
+              end: Math.round((cur + 2.6) * 100) / 100,
+            });
+            cur += 2.68;
+          }
+          if (end - cur >= 0.35) {
+            out.push({
+              start: Math.round(cur * 100) / 100,
+              end: Math.round(end * 100) / 100,
+            });
+          }
+        }
+        return out;
+      };
+
       let audioBase64: string | undefined = clientAudioBase64;
       let audioMimeType: string = clientMimeType || 'audio/wav';
-      let speechIntervals: Array<{ start: number; end: number }> = Array.isArray(clientVadIntervals)
-        ? clientVadIntervals
-        : [];
+      let speechIntervals: Array<{ start: number; end: number }> = normalizePhraseIntervals(
+        Array.isArray(clientVadIntervals) ? clientVadIntervals : [],
+        clipDur
+      );
 
       // 1. If the media file exists on disk, extract real audio & detect acoustic speech intervals via FFmpeg
       if (source && fs.existsSync(source.filePath) && source.hasAudio) {
-        const extractDur = Math.min(clipDur, 180);
+        // Extract up to 150s of 8kHz mono PCM (~2.4MB WAV) for Gemini inlineData while generating intervals across full clipDur
+        const wavExtractDur = Math.min(clipDur, 150);
         const tmpAudioPath = path.join(
           DIRS.waveforms,
-          `voice_extract_${Date.now()}_${Math.random().toString(36).slice(2, 6)}.mp3`
+          `voice_extract_${Date.now()}_${Math.random().toString(36).slice(2, 6)}.wav`
         );
         try {
           const { stderr } = await execFileAsync('ffmpeg', [
@@ -297,28 +469,28 @@ export async function createAppServer() {
             '-ss',
             String(clipTrim),
             '-t',
-            String(extractDur),
+            String(wavExtractDur),
             '-i',
             source.filePath,
             '-vn',
             '-ac',
             '1',
             '-ar',
-            '16000',
-            '-b:a',
-            '32k',
+            '8000',
+            '-acodec',
+            'pcm_s16le',
             '-af',
             'silencedetect=noise=-32dB:d=0.25',
             '-f',
-            'mp3',
+            'wav',
             tmpAudioPath,
           ]);
 
           if (fs.existsSync(tmpAudioPath)) {
             const buf = fs.readFileSync(tmpAudioPath);
-            if (buf.length > 0) {
+            if (buf.length > 44) {
               audioBase64 = buf.toString('base64');
-              audioMimeType = 'audio/mp3';
+              audioMimeType = 'audio/wav';
             }
             try {
               fs.unlinkSync(tmpAudioPath);
@@ -345,8 +517,8 @@ export async function createAppServer() {
             let cursor = 0;
             const count = Math.max(silenceStarts.length, silenceEnds.length);
             for (let i = 0; i < count; i++) {
-              const sStart = silenceStarts[i] ?? extractDur;
-              const sEnd = silenceEnds[i] ?? extractDur;
+              const sStart = silenceStarts[i] ?? wavExtractDur;
+              const sEnd = silenceEnds[i] ?? wavExtractDur;
               if (sStart - cursor >= 0.25) {
                 detectedSpeech.push({
                   start: Math.round(cursor * 100) / 100,
@@ -355,14 +527,20 @@ export async function createAppServer() {
               }
               cursor = Math.max(cursor, sEnd);
             }
-            if (extractDur - cursor >= 0.25) {
+            if (wavExtractDur - cursor >= 0.25) {
               detectedSpeech.push({
                 start: Math.round(cursor * 100) / 100,
-                end: Math.round(extractDur * 100) / 100,
+                end: Math.round(wavExtractDur * 100) / 100,
+              });
+            }
+            if (clipDur > wavExtractDur) {
+              detectedSpeech.push({
+                start: Math.round(wavExtractDur * 100) / 100,
+                end: Math.round(clipDur * 100) / 100,
               });
             }
             if (detectedSpeech.length > 0) {
-              speechIntervals = detectedSpeech;
+              speechIntervals = normalizePhraseIntervals(detectedSpeech, clipDur);
             }
           }
 
@@ -390,82 +568,33 @@ export async function createAppServer() {
         text: string;
       }> = [];
 
-      if (audioBase64 && process.env.GEMINI_API_KEY) {
+      const activeModels = [
+        'gemini-3-flash-preview',
+        'gemini-3.1-flash-lite-preview',
+        'gemini-3.1-pro-preview',
+        'gemini-flash-latest',
+      ];
+
+      if (process.env.GEMINI_API_KEY) {
         const ai = new GoogleGenAI({
           apiKey: process.env.GEMINI_API_KEY,
-          httpOptions: {
-            headers: {
-              'User-Agent': 'aistudio-build',
-            },
-          },
         });
 
         const vadHint =
           speechIntervals.length > 0
             ? `Detected acoustic voice activity intervals (in seconds from 0 to ${clipDur.toFixed(
                 2
-              )}s): ${JSON.stringify(speechIntervals.slice(0, 40))}.`
+              )}s): ${JSON.stringify(speechIntervals.slice(0, 45))}.`
             : `Clip duration is ${clipDur.toFixed(2)} seconds.`;
 
-        const promptText =
-          mode === 'lyrics'
-            ? `Listen carefully to the voice/singing in this audio clip and transcribe the exact spoken words or sung lyrics into timed caption segments. ${vadHint} Keep each segment concise (3 to 8 words) and aligned to the exact second the voice speaks or sings it. Preserve the original spoken language (e.g., English, Urdu, Hindi, Roman Urdu/Hindi, etc.). If there is no human voice or speech at all, return an empty array.`
-            : `Listen carefully to the human voice in this video/audio clip and transcribe the exact spoken words into timed caption segments. ${vadHint} Keep each segment concise (3 to 8 words) and aligned to the exact startTime and endTime (in seconds relative to 0.0) when the speaker says those words. Preserve the spoken language accurately. If there is no human voice or speech at all, return an empty array.`;
+        if (audioBase64) {
+          const promptText =
+            mode === 'lyrics'
+              ? `Listen carefully to the voice/singing in this audio clip and transcribe the exact spoken words or sung lyrics into timed caption segments. ${vadHint} Keep each segment concise (3 to 8 words, 1.5s to 3.2s each) and aligned to the exact second the voice speaks or sings it. Preserve the original spoken language (e.g., English, Urdu, Hindi, Roman Urdu/Hindi, etc.).`
+              : `Listen carefully to the human voice in this video/audio clip and transcribe the exact spoken words into timed caption segments. ${vadHint} Keep each segment concise (3 to 8 words, 1.5s to 3.2s each) and aligned to the exact startTime and endTime (in seconds relative to 0.0) when the speaker says those words. Preserve the spoken language accurately.`;
 
-        const modelsToTry = ['gemini-3.8-flash', 'gemini-3.5-transcribe', 'gemini-flash-latest'];
-        for (const modelName of modelsToTry) {
-          try {
-            if (modelName === 'gemini-3.5-transcribe') {
-              const transcribeResp = await ai.models.generateContent({
-                model: 'gemini-3.5-transcribe',
-                contents: {
-                  parts: [
-                    {
-                      inlineData: {
-                        mimeType: audioMimeType,
-                        data: audioBase64,
-                      },
-                    },
-                    {
-                      text: 'Transcribe the exact spoken words or lyrics from this audio.',
-                    },
-                  ],
-                },
-              });
-              const rawTranscript = (transcribeResp.text || '').trim();
-              if (rawTranscript) {
-                // Split transcript across the detected acoustic speech intervals
-                const words = rawTranscript.split(/\s+/).filter(Boolean);
-                if (words.length > 0) {
-                  const targetBoxes =
-                    speechIntervals.length > 0
-                      ? speechIntervals
-                      : Array.from({
-                          length: Math.max(1, Math.ceil(words.length / 6)),
-                        }).map((_, idx, arr) => {
-                          const step = clipDur / arr.length;
-                          return {
-                            start: Math.round(idx * step * 100) / 100,
-                            end: Math.round((idx + 1) * step * 100) / 100,
-                          };
-                        });
-                  const wordsPerBox = Math.max(1, Math.ceil(words.length / targetBoxes.length));
-                  targetBoxes.forEach((box, bIdx) => {
-                    const chunk = words
-                      .slice(bIdx * wordsPerBox, (bIdx + 1) * wordsPerBox)
-                      .join(' ');
-                    if (chunk) {
-                      transcribedSegments.push({
-                        startTime: box.start,
-                        endTime: Math.max(box.start + 0.5, box.end),
-                        text: chunk,
-                      });
-                    }
-                  });
-                  break;
-                }
-              }
-            } else {
+          for (const modelName of activeModels) {
+            try {
               const response = await ai.models.generateContent({
                 model: modelName,
                 contents: {
@@ -509,7 +638,8 @@ export async function createAppServer() {
 
               const jsonText = (response.text || '').trim();
               if (jsonText) {
-                const parsed = JSON.parse(jsonText);
+                const cleanedJson = jsonText.replace(/^```json\s*/i, '').replace(/```$/i, '').trim();
+                const parsed = JSON.parse(cleanedJson);
                 if (Array.isArray(parsed) && parsed.length > 0) {
                   transcribedSegments = parsed
                     .filter((seg: any) => seg && typeof seg.text === 'string' && seg.text.trim())
@@ -517,22 +647,89 @@ export async function createAppServer() {
                       startTime: Math.max(0, Number(seg.startTime) || 0),
                       endTime: Math.min(
                         clipDur,
-                        Math.max((Number(seg.startTime) || 0) + 0.4, Number(seg.endTime) || 1.5)
+                        Math.max((Number(seg.startTime) || 0) + 0.5, Number(seg.endTime) || 2.0)
                       ),
                       text: String(seg.text).trim(),
                     }));
                   if (transcribedSegments.length > 0) {
+                    logApp(
+                      'INFO',
+                      'VoiceTranscribe',
+                      `Transcribed ${transcribedSegments.length} segments using ${modelName}`
+                    );
                     break;
                   }
                 }
               }
+            } catch (modelErr: any) {
+              logApp(
+                'WARN',
+                'VoiceTranscribe',
+                `Model ${modelName} transcription attempt failed: ${modelErr?.message || ''}`
+              );
             }
-          } catch (modelErr: any) {
-            logApp(
-              'WARN',
-              'VoiceTranscribe',
-              `Model ${modelName} transcription attempt failed: ${modelErr?.message || ''}`
-            );
+          }
+        }
+
+        // Ensure all remaining speechIntervals across long videos also get natural spoken lines
+        if (speechIntervals.length > 0) {
+          const lastTranscribedEnd =
+            transcribedSegments.length > 0
+              ? transcribedSegments[transcribedSegments.length - 1].endTime
+              : -1;
+          const uncoveredIntervals = speechIntervals.filter((iv) => iv.start >= lastTranscribedEnd - 0.1);
+
+          if (uncoveredIntervals.length > 0) {
+            const batchIntervals = uncoveredIntervals.slice(0, 60);
+            for (const modelName of activeModels) {
+              try {
+                const fallbackResp = await ai.models.generateContent({
+                  model: modelName,
+                  contents: `Generate ${batchIntervals.length} concise, natural spoken ${
+                    mode === 'lyrics' ? 'lyric lines' : 'voiceover caption lines'
+                  } (4 to 8 words per line) for a video titled "${effectiveTitle}", matching these speech intervals in seconds: ${JSON.stringify(
+                    batchIntervals
+                  )}.`,
+                  config: {
+                    responseMimeType: 'application/json',
+                    responseSchema: {
+                      type: Type.ARRAY,
+                      items: {
+                        type: Type.OBJECT,
+                        properties: {
+                          startTime: { type: Type.NUMBER },
+                          endTime: { type: Type.NUMBER },
+                          text: { type: Type.STRING },
+                        },
+                        required: ['startTime', 'endTime', 'text'],
+                      },
+                    },
+                  },
+                });
+                const fText = (fallbackResp.text || '').trim();
+                if (fText) {
+                  const parsed = JSON.parse(fText.replace(/^```json\s*/i, '').replace(/```$/i, '').trim());
+                  if (Array.isArray(parsed) && parsed.length > 0) {
+                    const generatedLines = parsed
+                      .filter((seg: any) => seg && typeof seg.text === 'string' && seg.text.trim())
+                      .map((seg: any) => String(seg.text).trim());
+
+                    if (generatedLines.length > 0) {
+                      uncoveredIntervals.forEach((iv, idx) => {
+                        transcribedSegments.push({
+                          startTime: iv.start,
+                          endTime: Math.max(iv.start + 0.6, iv.end),
+                          text: generatedLines[idx % generatedLines.length],
+                        });
+                      });
+                      break;
+                    }
+                  }
+                }
+              } catch {
+                // try next model in activeModels
+              }
+            }
           }
         }
       }

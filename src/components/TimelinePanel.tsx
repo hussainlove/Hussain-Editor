@@ -1,4 +1,4 @@
-import React, { useRef, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import {
   Scissors,
   Copy,
@@ -42,10 +42,13 @@ import {
   TimelineClip,
   KeyframePoint,
   TextStyleConfig,
+  WordStyleOverride,
+  VOICE_SYNC_CAPTION_FORMATS,
   BUILTIN_TRANSITIONS,
   BUILTIN_FONTS,
   BUILTIN_ANIMATIONS,
   BUILTIN_LOOP_ANIMATIONS,
+  ONLINE_ANIMATION_CATALOG,
   DEFAULT_TEXT_STYLE,
   isTrackCompatibleWithClip,
 } from '../types/editor';
@@ -95,7 +98,7 @@ interface TimelinePanelProps {
   onDuplicateSelected: () => void;
   onGroupSelected: () => void;
   onToggleTrackProp: (trackId: string, prop: 'locked' | 'hidden' | 'muted' | 'solo') => void;
-  onAddTrack: (type: 'video' | 'audio') => void;
+  onAddTrack: (type: 'video' | 'audio' | 'caption') => void;
   onUpdateClipTiming: (
     clipId: string,
     newStartTime: number,
@@ -136,20 +139,42 @@ interface TimelinePanelProps {
     strokeWidth: number;
     shadowColor: string;
     shadowBlur: number;
+    shadowOpacity?: number;
+    shadowOffsetX?: number;
+    shadowOffsetY?: number;
     backgroundColor: string;
     backgroundOpacity: number;
+    padding?: number;
+    cornerRadius?: number;
+    letterSpacing?: number;
+    lineHeight?: number;
     align: 'left' | 'center' | 'right';
     bold: boolean;
     italic: boolean;
     underline: boolean;
     positionPreset: 'bottom' | 'center' | 'top';
+    positionX?: number;
+    positionYOffset?: number;
+    scale?: number;
+    rotation?: number;
+    opacity?: number;
+    startTime?: number;
     animationIn: string;
     animationOut: string;
     animationLoop: string;
     duration: number;
+    activeWordColor?: string;
+    activeWordBgColor?: string;
+    activeWordGlowColor?: string;
+    activeWordScale?: number;
+    inactiveWordSameColor?: boolean;
+    wordStyles?: Record<number, WordStyleOverride>;
+    targetType?: 'caption' | 'text';
     updateSelected?: boolean;
+    applyToAllCaptions?: boolean;
   }) => void;
   onAutoCaptions?: (style: string, mode?: 'lyrics' | 'speech') => void;
+  isBusy?: boolean;
 }
 
 export const TimelinePanel: React.FC<TimelinePanelProps> = ({
@@ -192,6 +217,7 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
   onAddCustomFont,
   onAddOrUpdateCaptionFull,
   onAutoCaptions,
+  isBusy = false,
 }) => {
   const scrollContainerRef = useRef<HTMLDivElement>(null);
   const trackHeadersRef = useRef<HTMLDivElement>(null);
@@ -207,28 +233,108 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
   const [cutTransitionDuration, setCutTransitionDuration] = useState<number>(0.5);
   const [cutTransitionSearch, setCutTransitionSearch] = useState<string>('');
 
-  // Dedicated "+ Caption" All-Options Studio Bar state
+  // Dedicated "+ Caption" All-Options Studio Window state (Basic & Advanced Settings)
   const [showCaptionStudioBar, setShowCaptionStudioBar] = useState(false);
+  // Dedicated "Font, Text, Animation & Word-by-Word Color Studio Window" state
+  const [showFontStudioWindow, setShowFontStudioWindow] = useState(false);
+  // Checkbox option: Apply setting to ALL Captions on Timeline
+  const [applyToAllCaptionsChecked, setApplyToAllCaptionsChecked] = useState(true);
+  // Right-click hold directional auto-scroll state
+  const [isRightClickScrolling, setIsRightClickScrolling] = useState(false);
+
   const [capText, setCapText] = useState('Welcome to Hussain Video Editor\nGlowing Second Line');
-  const [capPreset, setCapPreset] = useState<NonNullable<TextStyleConfig['captionPreset']>>('WordGlowing');
+  const [capPreset, setCapPreset] = useState<NonNullable<TextStyleConfig['captionPreset']>>('YellowVoiceSync');
   const [capFontFamily, setCapFontFamily] = useState(DEFAULT_TEXT_STYLE.fontFamily);
-  const [capFontSize, setCapFontSize] = useState(40);
+  const [capFontSize, setCapFontSize] = useState(42);
   const [capColor, setCapColor] = useState('#FFFFFF');
+  const [capActiveWordColor, setCapActiveWordColor] = useState('#FACC15');
+  const [capActiveWordBgColor, setCapActiveWordBgColor] = useState('transparent');
+  const [capActiveWordGlowColor, setCapActiveWordGlowColor] = useState('#FACC15');
+  const [capActiveWordScale, setCapActiveWordScale] = useState(1.16);
+  const [capWordStyles, setCapWordStyles] = useState<Record<number, WordStyleOverride>>({});
+  const [selectedWordIdx, setSelectedWordIdx] = useState<number | null>(0);
+  const [studioVoicePreviewIdx, setStudioVoicePreviewIdx] = useState<number>(0);
   const [capStrokeColor, setCapStrokeColor] = useState('#000000');
   const [capStrokeWidth, setCapStrokeWidth] = useState(2);
-  const [capShadowColor, setCapShadowColor] = useState('#38BDF8');
-  const [capShadowBlur, setCapShadowBlur] = useState(14);
+  const [capShadowColor, setCapShadowColor] = useState('#000000');
+  const [capShadowBlur, setCapShadowBlur] = useState(12);
+  const [capShadowOpacity, setCapShadowOpacity] = useState(85);
+  const [capShadowOffsetX, setCapShadowOffsetX] = useState(0);
+  const [capShadowOffsetY, setCapShadowOffsetY] = useState(3);
   const [capBgColor, setCapBgColor] = useState('#0F172A');
-  const [capBgOpacity, setCapBgOpacity] = useState(75);
+  const [capBgOpacity, setCapBgOpacity] = useState(70);
+  const [capPadding, setCapPadding] = useState(12);
+  const [capCornerRadius, setCapCornerRadius] = useState(8);
+  const [capLetterSpacing, setCapLetterSpacing] = useState(0);
+  const [capLineHeight, setCapLineHeight] = useState(1.25);
   const [capAlign, setCapAlign] = useState<'left' | 'center' | 'right'>('center');
   const [capBold, setCapBold] = useState(true);
   const [capItalic, setCapItalic] = useState(false);
   const [capUnderline, setCapUnderline] = useState(false);
   const [capPosition, setCapPosition] = useState<'bottom' | 'center' | 'top'>('bottom');
+  const [capPosX, setCapPosX] = useState(0);
+  const [capPosYOffset, setCapPosYOffset] = useState(0);
+
+  // Sync Caption Studio & Font Studio fields when a caption or text clip is selected
+  useEffect(() => {
+    const selCap = clips.find(
+      (c) => selectedClipIds.includes(c.id) && (c.type === 'caption' || c.type === 'text')
+    );
+    if (selCap) {
+      if (selCap.textContent) setCapText(selCap.textContent);
+      setCapDuration(selCap.duration);
+      if (selCap.textStyle) {
+        setCapPreset(selCap.textStyle.captionPreset || 'YellowVoiceSync');
+        setCapFontFamily(selCap.textStyle.fontFamily || DEFAULT_TEXT_STYLE.fontFamily);
+        setCapFontSize(selCap.textStyle.fontSize || 42);
+        setCapColor(selCap.textStyle.color || '#FFFFFF');
+        setCapActiveWordColor(selCap.textStyle.activeWordColor || '#FACC15');
+        setCapActiveWordBgColor(selCap.textStyle.activeWordBgColor || '');
+        setCapActiveWordGlowColor(selCap.textStyle.activeWordGlowColor || '#FACC15');
+        setCapActiveWordScale(selCap.textStyle.activeWordScale || 1.16);
+        setCapWordStyles(selCap.textStyle.wordStyles || {});
+        setCapStrokeColor(selCap.textStyle.strokeColor || '#000000');
+        setCapStrokeWidth(selCap.textStyle.strokeWidth ?? 2);
+        setCapShadowColor(selCap.textStyle.shadowColor || '#000000');
+        setCapShadowBlur(selCap.textStyle.shadowBlur ?? 12);
+        setCapBgColor(selCap.textStyle.backgroundColor || '#0F172A');
+        setCapBgOpacity(selCap.textStyle.backgroundOpacity ?? 70);
+      }
+    }
+  }, [selectedClipIds, clips]);
+  const [capScale, setCapScale] = useState(100);
+  const [capRotation, setCapRotation] = useState(0);
+  const [capOpacity, setCapOpacity] = useState(100);
   const [capAnimIn, setCapAnimIn] = useState('Pop');
   const [capAnimOut, setCapAnimOut] = useState('Fade Out');
   const [capAnimLoop, setCapAnimLoop] = useState('None');
   const [capDuration, setCapDuration] = useState(3.0);
+
+  // Live animated voice word ticker inside the Caption & Font Studio Windows
+  useEffect(() => {
+    if (!showCaptionStudioBar && !showFontStudioWindow) return;
+    const words = (capText || 'Sample Caption Text').split(/\s+/).filter(Boolean);
+    const timer = window.setInterval(() => {
+      setStudioVoicePreviewIdx((t) => (t + 1) % Math.max(1, words.length));
+    }, 520);
+    return () => window.clearInterval(timer);
+  }, [showCaptionStudioBar, showFontStudioWindow, capText]);
+
+  // Listen for global 'hve-open-caption-window' and 'hve-open-font-window' events
+  useEffect(() => {
+    const onOpenCaptionWindow = () => {
+      setShowCaptionStudioBar(true);
+    };
+    const onOpenFontWindow = () => {
+      setShowFontStudioWindow(true);
+    };
+    window.addEventListener('hve-open-caption-window', onOpenCaptionWindow);
+    window.addEventListener('hve-open-font-window', onOpenFontWindow);
+    return () => {
+      window.removeEventListener('hve-open-caption-window', onOpenCaptionWindow);
+      window.removeEventListener('hve-open-font-window', onOpenFontWindow);
+    };
+  }, []);
 
   // Dedicated "+ Add Font" Popover state
   const [showAddFontBar, setShowAddFontBar] = useState(false);
@@ -498,6 +604,21 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
     }
   };
 
+  // Keep playhead within visible horizontal viewport when stepping with keyboard arrows/Shift+arrows
+  useEffect(() => {
+    const scroller = scrollContainerRef.current;
+    if (!scroller || isRightClickScrolling || dragState) return;
+    const playheadPx = playheadTime * zoomPxPerSec;
+    const viewLeft = scroller.scrollLeft;
+    const viewRight = viewLeft + scroller.clientWidth;
+    const margin = 48;
+    if (playheadPx < viewLeft + margin) {
+      scroller.scrollLeft = Math.max(0, playheadPx - margin);
+    } else if (playheadPx > viewRight - margin) {
+      scroller.scrollLeft = playheadPx - scroller.clientWidth + margin;
+    }
+  }, [playheadTime, zoomPxPerSec, isRightClickScrolling, dragState]);
+
   // Render an individual tool widget in the Timeline Toolbar
   const renderToolbarWidget = (itemId: TimelineToolbarItemId) => {
     switch (itemId) {
@@ -552,6 +673,11 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                 (activeOrSelectedClip.type === 'caption' || activeOrSelectedClip.type === 'text')
               ) {
                 setCapText(activeOrSelectedClip.textContent || activeOrSelectedClip.name);
+                setCapDuration(activeOrSelectedClip.duration || 3.0);
+                setCapPosX(activeOrSelectedClip.positionX || 0);
+                setCapScale(activeOrSelectedClip.scaleX || 100);
+                setCapRotation(activeOrSelectedClip.rotation || 0);
+                setCapOpacity(activeOrSelectedClip.opacity ?? 100);
                 if (activeOrSelectedClip.textStyle) {
                   setCapPreset(activeOrSelectedClip.textStyle.captionPreset || 'WordGlowing');
                   setCapFontFamily(activeOrSelectedClip.textStyle.fontFamily);
@@ -561,19 +687,26 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                   setCapStrokeWidth(activeOrSelectedClip.textStyle.strokeWidth);
                   setCapShadowColor(activeOrSelectedClip.textStyle.shadowColor);
                   setCapShadowBlur(activeOrSelectedClip.textStyle.shadowBlur);
+                  setCapShadowOpacity(activeOrSelectedClip.textStyle.shadowOpacity ?? 85);
+                  setCapShadowOffsetX(activeOrSelectedClip.textStyle.shadowOffsetX ?? 0);
+                  setCapShadowOffsetY(activeOrSelectedClip.textStyle.shadowOffsetY ?? 3);
                   setCapBgColor(activeOrSelectedClip.textStyle.backgroundColor);
                   setCapBgOpacity(activeOrSelectedClip.textStyle.backgroundOpacity);
+                  setCapPadding(activeOrSelectedClip.textStyle.padding ?? 12);
+                  setCapCornerRadius(activeOrSelectedClip.textStyle.cornerRadius ?? 8);
+                  setCapLetterSpacing(activeOrSelectedClip.textStyle.letterSpacing ?? 0);
+                  setCapLineHeight(activeOrSelectedClip.textStyle.lineHeight ?? 1.25);
                   setCapAlign(activeOrSelectedClip.textStyle.align);
                 }
               }
-              setShowCaptionStudioBar((prev) => !prev);
+              setShowCaptionStudioBar(true);
             }}
             className={`px-2.5 py-0.5 rounded text-[11px] flex items-center gap-1 border transition-colors whitespace-nowrap ${
               showCaptionStudioBar
                 ? 'bg-amber-400 text-slate-950 border-amber-300 font-bold'
                 : 'bg-amber-500/15 hover:bg-amber-500/25 border-amber-500/40 text-amber-300 font-semibold'
             }`}
-            title="Open Caption Studio with All Options (Auto Lyrics, Word Glowing, Multiline, Fonts, Colors, Animations)"
+            title="Open Full Caption Studio Window (All Basic & Advanced Settings)"
           >
             <MessageSquare className="w-3 h-3 text-amber-400" />
             <span>+Caption</span>
@@ -584,10 +717,11 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
         return (
           <button
             onClick={() => {
+              setShowCaptionStudioBar(true);
               onAutoCaptions?.(capPreset || 'WordGlowing', 'speech');
             }}
             className="px-2.5 py-0.5 rounded text-[11px] flex items-center gap-1 bg-sky-500 hover:bg-sky-400 text-slate-950 font-bold border border-sky-400 transition-colors whitespace-nowrap shadow-xs"
-            title="Trace Video Voice & Generate Synchronized Captions onto CAPTIONS Track"
+            title="Trace Video Voice & Open Full Caption Studio Window"
           >
             <Sparkles className="w-3 h-3 text-slate-950" />
             <span>Generate Caption</span>
@@ -597,16 +731,16 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
       case 'font':
         return (
           <button
-            onClick={() => setShowAddFontBar((prev) => !prev)}
-            className={`px-2 py-0.5 rounded text-[11px] flex items-center gap-1 border transition-colors whitespace-nowrap ${
-              showAddFontBar
+            onClick={() => setShowFontStudioWindow((prev) => !prev)}
+            className={`px-2.5 py-0.5 rounded text-[11px] flex items-center gap-1 border transition-colors whitespace-nowrap ${
+              showFontStudioWindow
                 ? 'bg-purple-500 text-slate-950 border-purple-400 font-bold'
-                : 'bg-purple-500/15 hover:bg-purple-500/25 border-purple-500/40 text-purple-300 font-medium'
+                : 'bg-purple-500/15 hover:bg-purple-500/25 border-purple-500/40 text-purple-300 font-semibold'
             }`}
-            title="Add Custom Font or Upload .TTF / .OTF / .WOFF2 Font File"
+            title="Open Full Font, Text, Animation & Word-by-Word Color Studio Window"
           >
             <Type className="w-3 h-3 text-purple-400" />
-            <span>+Add Font</span>
+            <span>Font & Text Studio</span>
           </button>
         );
 
@@ -707,14 +841,23 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
             <button
               onClick={() => onAddTrack('video')}
               className="px-2 py-0.5 bg-slate-900 hover:bg-slate-800 border border-slate-800 text-slate-300 rounded text-[11px] flex items-center gap-1 whitespace-nowrap"
+              title="Add Unlimited Video Track"
             >
               <Plus className="w-3 h-3 text-sky-400" /> V-Track
             </button>
             <button
               onClick={() => onAddTrack('audio')}
               className="px-2 py-0.5 bg-slate-900 hover:bg-slate-800 border border-slate-800 text-slate-300 rounded text-[11px] flex items-center gap-1 whitespace-nowrap"
+              title="Add Unlimited Audio Track"
             >
               <Plus className="w-3 h-3 text-emerald-400" /> A-Track
+            </button>
+            <button
+              onClick={() => onAddTrack('caption')}
+              className="px-2 py-0.5 bg-slate-900 hover:bg-slate-800 border border-slate-800 text-slate-300 rounded text-[11px] flex items-center gap-1 whitespace-nowrap"
+              title="Add Unlimited Caption Track"
+            >
+              <Plus className="w-3 h-3 text-amber-400" /> C-Track
             </button>
           </div>
         );
@@ -741,24 +884,24 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
 
             <div className="flex items-center gap-1">
               <button
-                onClick={() => setZoomPxPerSec(Math.max(15, zoomPxPerSec - 15))}
+                onClick={() => setZoomPxPerSec(Math.max(1, zoomPxPerSec - 10))}
                 className="p-0.5 text-slate-400 hover:text-slate-200"
-                title="Zoom Out Timeline"
+                title="Zoom Out Timeline (Down to 1px/s for Multi-Hour Videos)"
               >
                 <ZoomOut className="w-3.5 h-3.5" />
               </button>
               <input
                 type="range"
-                min={15}
-                max={160}
+                min={1}
+                max={400}
                 value={zoomPxPerSec}
                 onChange={(e) => setZoomPxPerSec(Number(e.target.value))}
                 className="w-16 sm:w-20 accent-sky-500 h-1 bg-slate-800 rounded"
               />
               <button
-                onClick={() => setZoomPxPerSec(Math.min(160, zoomPxPerSec + 15))}
+                onClick={() => setZoomPxPerSec(Math.min(400, zoomPxPerSec + 10))}
                 className="p-0.5 text-slate-400 hover:text-slate-200"
-                title="Zoom In Timeline"
+                title="Zoom In Timeline (Up to 400px/s)"
               >
                 <ZoomIn className="w-3.5 h-3.5" />
               </button>
@@ -826,8 +969,8 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
         }}
       />
 
-      {/* Render Toolbar at Top (or Floating Freehand) */}
-      {(toolbarDockEdge === 'top' || isToolbarFreehand) && timelineToolbarElement}
+      {/* Render Toolbar at Top */}
+      {timelineToolbarElement}
 
       {/* "+Add Font" Quick Bar when +Add Font button in Timeline Toolbar is clicked */}
       {showAddFontBar && (
@@ -891,299 +1034,1484 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
         </div>
       )}
 
-      {/* Dedicated "+Caption" Studio Panel with ALL Options */}
-      {showCaptionStudioBar && (
-        <div className="px-3 py-2 bg-slate-900/95 border-b border-amber-500/50 flex flex-col gap-2 shrink-0 max-h-56 overflow-y-auto">
-          {/* Row 1: Caption Text + Auto Lyrics / Auto Speech + Add / Update Actions */}
-          <div className="flex flex-wrap items-center justify-between gap-2">
-            <div className="flex items-center gap-1.5 flex-1 min-w-[220px]">
-              <MessageSquare className="w-3.5 h-3.5 text-amber-400 shrink-0" />
-              <span className="text-[11px] font-bold text-amber-300 whitespace-nowrap">
-                Caption Studio (All Options):
-              </span>
-              <input
-                type="text"
-                value={capText}
-                onChange={(e) => setCapText(e.target.value)}
-                placeholder="Type caption or multiline text (use | for second line)..."
-                className="flex-1 bg-slate-950 border border-slate-700 focus:border-amber-400 rounded px-2 py-1 text-xs text-slate-100 focus:outline-none"
-              />
-            </div>
-
-            <div className="flex flex-wrap items-center gap-1.5">
-              <button
-                type="button"
-                onClick={() => onAutoCaptions?.(capPreset, 'lyrics')}
-                className="px-2 py-1 bg-sky-500/20 hover:bg-sky-500 text-sky-300 hover:text-slate-950 border border-sky-500/40 rounded text-[10px] font-semibold flex items-center gap-1 whitespace-nowrap"
-              >
-                <Music className="w-3 h-3" /> Auto Lyrics
-              </button>
-              <button
-                type="button"
-                onClick={() => onAutoCaptions?.(capPreset, 'speech')}
-                className="px-2 py-1 bg-purple-500/20 hover:bg-purple-500 text-purple-300 hover:text-slate-950 border border-purple-500/40 rounded text-[10px] font-semibold flex items-center gap-1 whitespace-nowrap"
-              >
-                <Wand2 className="w-3 h-3" /> Auto Speech
-              </button>
-              <button
-                type="button"
-                onClick={() => {
-                  onAddOrUpdateCaptionFull?.({
-                    text: capText,
-                    stylePreset: capPreset,
-                    fontFamily: capFontFamily,
-                    fontSize: capFontSize,
-                    color: capColor,
-                    strokeColor: capStrokeColor,
-                    strokeWidth: capStrokeWidth,
-                    shadowColor: capShadowColor,
-                    shadowBlur: capShadowBlur,
-                    backgroundColor: capBgColor,
-                    backgroundOpacity: capBgOpacity,
-                    align: capAlign,
-                    bold: capBold,
-                    italic: capItalic,
-                    underline: capUnderline,
-                    positionPreset: capPosition,
-                    animationIn: capAnimIn,
-                    animationOut: capAnimOut,
-                    animationLoop: capAnimLoop,
-                    duration: capDuration,
-                    updateSelected: false,
-                  });
-                }}
-                className="px-2.5 py-1 bg-amber-400 hover:bg-amber-300 text-slate-950 font-bold rounded text-[11px] flex items-center gap-1 whitespace-nowrap"
-              >
-                <Plus className="w-3 h-3" /> Add Caption
-              </button>
-              {activeOrSelectedClip &&
-                (activeOrSelectedClip.type === 'caption' || activeOrSelectedClip.type === 'text') && (
-                  <button
-                    type="button"
-                    onClick={() => {
-                      onAddOrUpdateCaptionFull?.({
-                        text: capText,
-                        stylePreset: capPreset,
-                        fontFamily: capFontFamily,
-                        fontSize: capFontSize,
-                        color: capColor,
-                        strokeColor: capStrokeColor,
-                        strokeWidth: capStrokeWidth,
-                        shadowColor: capShadowColor,
-                        shadowBlur: capShadowBlur,
-                        backgroundColor: capBgColor,
-                        backgroundOpacity: capBgOpacity,
-                        align: capAlign,
-                        bold: capBold,
-                        italic: capItalic,
-                        underline: capUnderline,
-                        positionPreset: capPosition,
-                        animationIn: capAnimIn,
-                        animationOut: capAnimOut,
-                        animationLoop: capAnimLoop,
-                        duration: capDuration,
-                        updateSelected: true,
-                      });
-                    }}
-                    className="px-2.5 py-1 bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold rounded text-[11px] flex items-center gap-1 whitespace-nowrap"
-                  >
-                    <Check className="w-3 h-3" /> Update Selected
-                  </button>
-                )}
-              <button
-                type="button"
-                onClick={() => setShowCaptionStudioBar(false)}
-                className="p-1 text-slate-400 hover:text-white"
-              >
-                <X className="w-3.5 h-3.5" />
-              </button>
-            </div>
-          </div>
-
-          {/* Row 2: All 10 Caption Style Presets */}
-          <div className="flex items-center gap-1 overflow-x-auto pb-0.5">
-            <span className="text-[10px] text-slate-400 font-medium mr-1 shrink-0">Style:</span>
-            {(
-              [
-                { id: 'WordGlowing', label: '✦ Word Glowing' },
-                { id: 'Multiline', label: '☰ Multiline' },
-                { id: 'Karaoke', label: '♪ Karaoke' },
-                { id: 'Highlight', label: '★ Highlight' },
-                { id: 'Bold', label: 'Bold' },
-                { id: 'Modern', label: 'Modern' },
-                { id: 'Cinematic', label: 'Cinematic' },
-                { id: 'Podcast', label: 'Podcast' },
-                { id: 'Minimal', label: 'Minimal' },
-                { id: 'Clean', label: 'Clean' },
-              ] as const
-            ).map((st) => (
-              <button
-                key={st.id}
-                type="button"
-                onClick={() => setCapPreset(st.id)}
-                className={`px-2 py-0.5 rounded text-[10px] border whitespace-nowrap transition-colors ${
-                  capPreset === st.id
-                    ? 'bg-amber-400 text-slate-950 border-amber-300 font-bold'
-                    : 'bg-slate-950 text-slate-300 border-slate-800 hover:border-slate-600'
-                }`}
-              >
-                {st.label}
-              </button>
-            ))}
-          </div>
-
-          {/* Row 3: Font Family + Add Font + Size + Colors + Position + Alignment + Animation + Duration */}
-          <div className="flex flex-wrap items-center gap-2 text-[10px] text-slate-300">
-            <div className="flex items-center gap-1 bg-slate-950 border border-slate-800 rounded px-1.5 py-0.5">
-              <span className="text-slate-400">Font:</span>
-              <select
-                value={capFontFamily}
-                onChange={(e) => setCapFontFamily(e.target.value)}
-                className="bg-slate-950 text-slate-100 focus:outline-none"
-              >
-                {availableFonts.map((f) => (
-                  <option key={f} value={f}>
-                    {f}
-                  </option>
-                ))}
-              </select>
-              <button
-                type="button"
-                onClick={() => setShowAddFontBar(true)}
-                className="px-1.5 py-0.2 bg-purple-500/20 text-purple-300 hover:bg-purple-500 hover:text-slate-950 rounded font-semibold"
-                title="Add New Font"
-              >
-                +Font
-              </button>
-            </div>
-
-            <div className="flex items-center gap-1 bg-slate-950 border border-slate-800 rounded px-1.5 py-0.5">
-              <span className="text-slate-400">Size:</span>
-              <input
-                type="number"
-                min={14}
-                max={140}
-                value={capFontSize}
-                onChange={(e) => setCapFontSize(Number(e.target.value) || 38)}
-                className="w-11 bg-transparent font-mono text-slate-100 focus:outline-none"
-              />
-            </div>
-
-            <div className="flex items-center gap-1 bg-slate-950 border border-slate-800 rounded px-1.5 py-0.5">
-              <span className="text-slate-400">Text:</span>
-              <input
-                type="color"
-                value={capColor}
-                onChange={(e) => setCapColor(e.target.value)}
-                className="w-4 h-4 bg-transparent cursor-pointer"
-              />
-              <span className="text-slate-400 ml-1">Stroke:</span>
-              <input
-                type="color"
-                value={capStrokeColor}
-                onChange={(e) => setCapStrokeColor(e.target.value)}
-                className="w-4 h-4 bg-transparent cursor-pointer"
-              />
-              <span className="text-slate-400 ml-1">Glow:</span>
-              <input
-                type="color"
-                value={capShadowColor}
-                onChange={(e) => setCapShadowColor(e.target.value)}
-                className="w-4 h-4 bg-transparent cursor-pointer"
-              />
-              <span className="text-slate-400 ml-1">BG:</span>
-              <input
-                type="color"
-                value={capBgColor}
-                onChange={(e) => setCapBgColor(e.target.value)}
-                className="w-4 h-4 bg-transparent cursor-pointer"
-              />
-              <input
-                type="range"
-                min={0}
-                max={100}
-                value={capBgOpacity}
-                onChange={(e) => setCapBgOpacity(Number(e.target.value))}
-                className="w-12 accent-amber-400 h-1"
-                title={`Background Opacity: ${capBgOpacity}%`}
-              />
-            </div>
-
-            <div className="flex items-center gap-0.5 bg-slate-950 border border-slate-800 rounded p-0.5">
-              <button
-                type="button"
-                onClick={() => setCapBold((b) => !b)}
-                className={`px-1.5 rounded font-bold ${capBold ? 'bg-amber-400 text-slate-950' : 'text-slate-400'}`}
-              >
-                B
-              </button>
-              <button
-                type="button"
-                onClick={() => setCapItalic((i) => !i)}
-                className={`px-1.5 rounded italic ${capItalic ? 'bg-amber-400 text-slate-950' : 'text-slate-400'}`}
-              >
-                I
-              </button>
-              <button
-                type="button"
-                onClick={() => setCapUnderline((u) => !u)}
-                className={`px-1.5 rounded underline ${capUnderline ? 'bg-amber-400 text-slate-950' : 'text-slate-400'}`}
-              >
-                U
-              </button>
-            </div>
-
-            <div className="flex items-center gap-0.5 bg-slate-950 border border-slate-800 rounded p-0.5">
-              {(['bottom', 'center', 'top'] as const).map((pos) => (
-                <button
-                  key={pos}
-                  type="button"
-                  onClick={() => setCapPosition(pos)}
-                  className={`px-1.5 py-0.2 rounded capitalize ${
-                    capPosition === pos ? 'bg-sky-500 text-slate-950 font-bold' : 'text-slate-400'
+      {/* Dedicated Full-Screen / Floating Caption Studio & Font/Text Advanced Studio Window */}
+      {(showCaptionStudioBar || showFontStudioWindow) && (
+        <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-xs flex items-center justify-center p-2 sm:p-4 overflow-y-auto">
+          <div className="w-full max-w-6xl bg-[#0F172A] border border-amber-500/50 rounded-xl shadow-2xl flex flex-col max-h-[95vh] overflow-hidden">
+            {/* Window Header Bar */}
+            <div className="px-4 py-2.5 bg-slate-950 border-b border-slate-800 flex flex-wrap items-center justify-between gap-2 shrink-0">
+              <div className="flex items-center gap-2.5">
+                <div
+                  className={`w-8 h-8 rounded-lg flex items-center justify-center border ${
+                    showFontStudioWindow && !showCaptionStudioBar
+                      ? 'bg-purple-500/20 border-purple-500/40 text-purple-300'
+                      : 'bg-amber-500/20 border-amber-500/40 text-amber-400'
                   }`}
                 >
-                  {pos}
+                  {showFontStudioWindow && !showCaptionStudioBar ? (
+                    <Type className="w-4 h-4" />
+                  ) : (
+                    <MessageSquare className="w-4 h-4" />
+                  )}
+                </div>
+                <div>
+                  <div className="flex flex-wrap items-center gap-2">
+                    <h2 className="text-xs sm:text-sm font-bold text-slate-100">
+                      {showFontStudioWindow && !showCaptionStudioBar
+                        ? 'Font, Text, Word-by-Word Color & Animation Studio Window'
+                        : 'Caption, Voice-Sync & Word-by-Word Studio Window'}
+                    </h2>
+                    <div className="flex items-center gap-1 bg-slate-900 border border-slate-800 rounded-md p-0.5">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setShowCaptionStudioBar(true);
+                          setShowFontStudioWindow(false);
+                        }}
+                        className={`px-2 py-0.5 rounded text-[10px] font-semibold transition-colors ${
+                          showCaptionStudioBar
+                            ? 'bg-amber-400 text-slate-950 font-bold'
+                            : 'text-slate-400 hover:text-white'
+                        }`}
+                      >
+                        Caption & Voice Sync
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setShowFontStudioWindow(true);
+                          setShowCaptionStudioBar(false);
+                        }}
+                        className={`px-2 py-0.5 rounded text-[10px] font-semibold transition-colors ${
+                          showFontStudioWindow && !showCaptionStudioBar
+                            ? 'bg-purple-400 text-slate-950 font-bold'
+                            : 'text-slate-400 hover:text-white'
+                        }`}
+                      >
+                        Font & Text Advanced Studio
+                      </button>
+                    </div>
+                  </div>
+                  <p className="text-[10px] text-slate-400">
+                    Yellow & Green Voice-Synced Formats · Word-by-Word Color & Styling · Apply to All Captions Checkbox · Full Animations
+                  </p>
+                </div>
+              </div>
+
+              <div className="flex flex-wrap items-center gap-2">
+                {/* Prominent Check Option: Apply Same Setting to ALL Captions */}
+                <label
+                  className={`px-2.5 py-1.5 rounded-md border text-xs font-bold flex items-center gap-2 cursor-pointer select-none transition-all ${
+                    applyToAllCaptionsChecked
+                      ? 'bg-emerald-500/20 border-emerald-400 text-emerald-300 shadow-xs'
+                      : 'bg-slate-900 border-slate-700 text-slate-300 hover:border-amber-400/60'
+                  }`}
+                  title="When checked, applying or updating a segment setting automatically applies the exact same style, font, voice-sync & animation settings to ALL captions on the timeline"
+                >
+                  <input
+                    type="checkbox"
+                    checked={applyToAllCaptionsChecked}
+                    onChange={(e) => setApplyToAllCaptionsChecked(e.target.checked)}
+                    className="w-3.5 h-3.5 accent-emerald-400 rounded cursor-pointer"
+                  />
+                  <span>Apply Same Setting to ALL Captions</span>
+                </label>
+
+                <button
+                  type="button"
+                  disabled={isBusy}
+                  onClick={() => onAutoCaptions?.(capPreset, 'speech')}
+                  className="px-3 py-1.5 bg-sky-500 hover:bg-sky-400 disabled:opacity-60 text-slate-950 rounded-md text-xs font-bold flex items-center gap-1.5 shadow-sm transition-colors"
+                >
+                  <Sparkles className={`w-3.5 h-3.5 ${isBusy ? 'animate-spin' : ''}`} />
+                  <span>
+                    {isBusy ? 'Tracing Video Voice...' : 'Trace Video Voice (Auto Speech)'}
+                  </span>
                 </button>
-              ))}
+                <button
+                  type="button"
+                  disabled={isBusy}
+                  onClick={() => onAutoCaptions?.(capPreset, 'lyrics')}
+                  className="px-2.5 py-1.5 bg-purple-500/20 hover:bg-purple-500 disabled:opacity-60 text-purple-200 hover:text-slate-950 border border-purple-500/40 rounded-md text-xs font-semibold flex items-center gap-1.5 transition-colors"
+                >
+                  <Music className={`w-3.5 h-3.5 ${isBusy ? 'animate-pulse' : ''}`} />
+                  <span>{isBusy ? 'Tracing Lyrics...' : 'Trace Lyrics'}</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setShowCaptionStudioBar(false);
+                    setShowFontStudioWindow(false);
+                  }}
+                  className="p-1.5 bg-slate-900 hover:bg-rose-500/20 text-slate-400 hover:text-rose-300 border border-slate-800 rounded-md transition-colors"
+                  title="Close Studio Window"
+                >
+                  <X className="w-4 h-4" />
+                </button>
+              </div>
             </div>
 
-            <div className="flex items-center gap-1 bg-slate-950 border border-slate-800 rounded px-1.5 py-0.5">
-              <span className="text-slate-400">In:</span>
-              <select
-                value={capAnimIn}
-                onChange={(e) => setCapAnimIn(e.target.value)}
-                className="bg-slate-950 text-slate-100 focus:outline-none"
-              >
-                {BUILTIN_ANIMATIONS.map((a) => (
-                  <option key={a} value={a}>
-                    {a}
-                  </option>
-                ))}
-              </select>
-              <span className="text-slate-400 ml-1">Loop:</span>
-              <select
-                value={capAnimLoop}
-                onChange={(e) => setCapAnimLoop(e.target.value)}
-                className="bg-slate-950 text-slate-100 focus:outline-none"
-              >
-                {BUILTIN_LOOP_ANIMATIONS.map((a) => (
-                  <option key={a} value={a}>
-                    {a}
-                  </option>
-                ))}
-              </select>
-              <span className="text-slate-400 ml-1">Dur:</span>
-              <input
-                type="number"
-                step={0.5}
-                min={0.5}
-                max={60}
-                value={capDuration}
-                onChange={(e) => setCapDuration(Number(e.target.value) || 3)}
-                className="w-10 bg-transparent font-mono text-slate-100 focus:outline-none"
-              />
-              <span>s</span>
+            {/* Main 3-Column Arranged Studio Body */}
+            <div className="flex-1 overflow-y-auto p-3.5 grid grid-cols-1 lg:grid-cols-12 gap-3.5">
+              {/* COLUMN 1 (4 cols): Live Voice-Synced Preview, Word-by-Word Interactive Styler, Text Input & Timeline Segments */}
+              <div className="lg:col-span-4 flex flex-col gap-3">
+                {/* 1A. Live Voice-Synced Interactive Preview Box */}
+                <div className="bg-slate-950 border border-slate-800 rounded-lg p-3 flex flex-col gap-2">
+                  <div className="flex items-center justify-between text-[10px] font-mono text-slate-400">
+                    <span className="flex items-center gap-1.5">
+                      <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
+                      <span>LIVE VOICE-SYNC & WORD PREVIEW</span>
+                    </span>
+                    <span className="text-amber-400 font-semibold">{capPreset} · {capFontFamily}</span>
+                  </div>
+                  <div className="min-h-[112px] rounded-md bg-gradient-to-br from-slate-900 via-slate-950 to-slate-900 border border-slate-800/80 flex items-center justify-center p-3 overflow-hidden relative">
+                    {(() => {
+                      const rawLines = (capText || 'Welcome to Yellow & Green\nVoice Sync Studio').split(/\n|\|/);
+                      const allWordsFlat = rawLines
+                        .join(' ')
+                        .trim()
+                        .split(/\s+/)
+                        .filter(Boolean);
+                      const activePreviewIdx =
+                        allWordsFlat.length > 0 ? studioVoicePreviewIdx % allWordsFlat.length : 0;
+
+                      if (capPreset === 'SingleWordYellowGreen' && allWordsFlat.length > 0) {
+                        const w = allWordsFlat[activePreviewIdx] || allWordsFlat[0];
+                        const wOvr = capWordStyles[activePreviewIdx] || {};
+                        const isEven = activePreviewIdx % 2 === 0;
+                        const activeCol = wOvr.color || (isEven ? '#FACC15' : '#22C55E');
+                        return (
+                          <div
+                            style={{
+                              fontFamily: wOvr.fontFamily || capFontFamily,
+                              fontSize: `${Math.min(40, Math.max(16, Math.round(capFontSize * 0.72)))}px`,
+                              fontWeight: 800,
+                              color: activeCol,
+                              backgroundColor: wOvr.bgColor || 'rgba(2,6,23,0.88)',
+                              padding: '6px 16px',
+                              borderRadius: `${capCornerRadius}px`,
+                              WebkitTextStroke:
+                                capStrokeWidth > 0
+                                  ? `${Math.min(4, capStrokeWidth * 0.6)}px ${wOvr.strokeColor || capStrokeColor}`
+                                  : undefined,
+                              textShadow: `0 0 18px ${activeCol}`,
+                              transform: `scale(${wOvr.scale || capActiveWordScale || 1.15})`,
+                            }}
+                            className="transition-all duration-150 select-none font-extrabold"
+                          >
+                            {w}
+                          </div>
+                        );
+                      }
+
+                      let globalWordCounter = 0;
+                      return (
+                        <div
+                          style={{
+                            fontFamily: capFontFamily,
+                            fontSize: `${Math.min(30, Math.max(12, Math.round(capFontSize * 0.58)))}px`,
+                            fontWeight: capBold ? 800 : 400,
+                            fontStyle: capItalic ? 'italic' : 'normal',
+                            textDecoration: capUnderline ? 'underline' : 'none',
+                            color: capColor,
+                            letterSpacing: `${capLetterSpacing}px`,
+                            lineHeight: capLineHeight,
+                            textAlign: capAlign,
+                            padding: `${Math.min(18, capPadding)}px`,
+                            borderRadius: `${capCornerRadius}px`,
+                            backgroundColor:
+                              capBgOpacity > 0
+                                ? `${capBgColor}${Math.round((capBgOpacity / 100) * 255)
+                                    .toString(16)
+                                    .padStart(2, '0')}`
+                                : 'transparent',
+                            WebkitTextStroke:
+                              capStrokeWidth > 0
+                                ? `${Math.min(3.5, capStrokeWidth * 0.55)}px ${capStrokeColor}`
+                                : undefined,
+                            transform: `scale(${Math.min(1.2, Math.max(0.65, capScale / 100))}) rotate(${capRotation}deg)`,
+                            opacity: capOpacity / 100,
+                          }}
+                          className="transition-all select-none max-w-full break-words flex flex-col gap-1"
+                        >
+                          {rawLines.map((lineText, lIdx) => {
+                            const lineWords = lineText.trim().split(/\s+/).filter(Boolean);
+                            return (
+                              <div
+                                key={lIdx}
+                                className="flex flex-wrap items-center justify-center gap-x-1.5 gap-y-1"
+                              >
+                                {lineWords.map((word) => {
+                                  const wIdx = globalWordCounter++;
+                                  const isSpokenNow = wIdx === activePreviewIdx;
+                                  const wOvr = capWordStyles[wIdx] || {};
+                                  const isSelectedWord = selectedWordIdx === wIdx;
+
+                                  // Determine active voice color vs base color
+                                  let spokenColor = capActiveWordColor || '#FACC15';
+                                  let spokenBg = capActiveWordBgColor || 'transparent';
+                                  if (capPreset === 'GreenVoiceSync' || capPreset === 'MultilineGreenSync') {
+                                    spokenColor = capActiveWordColor || '#22C55E';
+                                  } else if (capPreset === 'YellowGreenMultiline') {
+                                    spokenColor = lIdx % 2 === 0 ? '#FACC15' : '#22C55E';
+                                  } else if (capPreset === 'YellowBoxSync') {
+                                    spokenColor = '#020617';
+                                    spokenBg = '#FACC15';
+                                  } else if (capPreset === 'GreenBoxSync') {
+                                    spokenColor = '#020617';
+                                    spokenBg = '#22C55E';
+                                  }
+
+                                  const finalColor = isSpokenNow
+                                    ? spokenColor
+                                    : wOvr.color || capColor;
+                                  const finalBg = isSpokenNow
+                                    ? spokenBg !== 'transparent'
+                                      ? spokenBg
+                                      : wOvr.bgColor || 'transparent'
+                                    : wOvr.bgColor || 'transparent';
+
+                                  return (
+                                    <span
+                                      key={wIdx}
+                                      onClick={() => setSelectedWordIdx(wIdx === selectedWordIdx ? null : wIdx)}
+                                      style={{
+                                        color: finalColor,
+                                        backgroundColor: finalBg,
+                                        fontFamily: wOvr.fontFamily || undefined,
+                                        fontWeight:
+                                          wOvr.bold !== undefined
+                                            ? wOvr.bold
+                                              ? 800
+                                              : 400
+                                            : isSpokenNow
+                                            ? 800
+                                            : undefined,
+                                        fontStyle:
+                                          wOvr.italic !== undefined
+                                            ? wOvr.italic
+                                              ? 'italic'
+                                              : 'normal'
+                                            : undefined,
+                                        textDecoration:
+                                          wOvr.underline !== undefined
+                                            ? wOvr.underline
+                                              ? 'underline'
+                                              : 'none'
+                                            : undefined,
+                                        padding: finalBg !== 'transparent' ? '1px 6px' : '0 2px',
+                                        borderRadius: '5px',
+                                        transform: isSpokenNow
+                                          ? `scale(${wOvr.scale || capActiveWordScale || 1.12})`
+                                          : wOvr.scale
+                                          ? `scale(${wOvr.scale})`
+                                          : undefined,
+                                        textShadow: isSpokenNow
+                                          ? `0 0 14px ${spokenBg !== 'transparent' ? spokenBg : spokenColor}`
+                                          : wOvr.glowColor
+                                          ? `0 0 10px ${wOvr.glowColor}`
+                                          : capShadowBlur > 0
+                                          ? `${capShadowOffsetX}px ${capShadowOffsetY}px ${capShadowBlur}px ${capShadowColor}`
+                                          : undefined,
+                                      }}
+                                      className={`inline-block transition-all duration-150 cursor-pointer ${
+                                        isSelectedWord ? 'ring-2 ring-sky-400 ring-offset-1 ring-offset-slate-950' : ''
+                                      }`}
+                                      title="Click word to customize its individual color & style"
+                                    >
+                                      {word}
+                                    </span>
+                                  );
+                                })}
+                              </div>
+                            );
+                          })}
+                        </div>
+                      );
+                    })()}
+                  </div>
+                  <div className="text-[10px] text-slate-400 flex items-center justify-between">
+                    <span>💡 Active word changes color with voice; other words keep their base color.</span>
+                    <span className="text-sky-400 font-semibold">Click any word above or below to style</span>
+                  </div>
+                </div>
+
+                {/* 1B. Word-by-Word Interactive Color & Styling Studio */}
+                <div className="bg-slate-950 border border-amber-500/40 rounded-lg p-3 space-y-2.5">
+                  <div className="flex items-center justify-between">
+                    <label className="text-[11px] font-bold text-amber-300 flex items-center gap-1.5">
+                      <Sparkles className="w-3.5 h-3.5 text-amber-400" />
+                      <span>Word-by-Word Color & Style Editor</span>
+                    </label>
+                    {Object.keys(capWordStyles).length > 0 && (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setCapWordStyles({});
+                          setSelectedWordIdx(null);
+                        }}
+                        className="px-2 py-0.5 bg-rose-500/15 hover:bg-rose-500/30 text-rose-300 border border-rose-500/30 rounded text-[9px] font-semibold"
+                      >
+                        Reset All Words
+                      </button>
+                    )}
+                  </div>
+
+                  {/* Clickable Word Chips */}
+                  <div className="flex flex-wrap gap-1.5 max-h-24 overflow-y-auto p-1.5 bg-slate-900/90 border border-slate-800 rounded-md">
+                    {(capText || 'Sample Caption Text')
+                      .replace(/\n|\|/g, ' ')
+                      .trim()
+                      .split(/\s+/)
+                      .filter(Boolean)
+                      .map((word, wIdx) => {
+                        const ovr = capWordStyles[wIdx] || {};
+                        const isSel = selectedWordIdx === wIdx;
+                        return (
+                          <button
+                            key={wIdx}
+                            type="button"
+                            onClick={() => setSelectedWordIdx(isSel ? null : wIdx)}
+                            style={{
+                              color: ovr.color || '#F8FAFC',
+                              backgroundColor: ovr.bgColor || '#1E293B',
+                            }}
+                            className={`px-2 py-0.5 rounded text-xs font-semibold border transition-all flex items-center gap-1 ${
+                              isSel
+                                ? 'border-amber-400 ring-2 ring-amber-400/40 scale-105'
+                                : 'border-slate-700 hover:border-slate-500'
+                            }`}
+                          >
+                            <span className="text-[9px] font-mono opacity-60">#{wIdx + 1}</span>
+                            <span>{word}</span>
+                          </button>
+                        );
+                      })}
+                  </div>
+
+                  {/* Per-Word Style Controls when a word is clicked */}
+                  {selectedWordIdx !== null ? (
+                    <div className="p-2.5 bg-slate-900 border border-amber-400/40 rounded-md space-y-2">
+                      <div className="flex items-center justify-between">
+                        <span className="text-[10px] font-bold text-amber-300">
+                          Styling Word #{selectedWordIdx + 1}: &ldquo;
+                          {(capText || 'Sample Caption Text')
+                            .replace(/\n|\|/g, ' ')
+                            .trim()
+                            .split(/\s+/)
+                            .filter(Boolean)[selectedWordIdx] || ''}
+                          &rdquo;
+                        </span>
+                        <div className="flex items-center gap-1">
+                          <button
+                            type="button"
+                            onClick={() =>
+                              setCapWordStyles((prev) => ({
+                                ...prev,
+                                [selectedWordIdx]: { ...prev[selectedWordIdx], color: '#FACC15' },
+                              }))
+                            }
+                            className="px-1.5 py-0.5 bg-amber-400 text-slate-950 font-bold rounded text-[9px]"
+                          >
+                            Yellow
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() =>
+                              setCapWordStyles((prev) => ({
+                                ...prev,
+                                [selectedWordIdx]: { ...prev[selectedWordIdx], color: '#22C55E' },
+                              }))
+                            }
+                            className="px-1.5 py-0.5 bg-emerald-400 text-slate-950 font-bold rounded text-[9px]"
+                          >
+                            Green
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() =>
+                              setCapWordStyles((prev) => ({
+                                ...prev,
+                                [selectedWordIdx]: { ...prev[selectedWordIdx], color: '#38BDF8' },
+                              }))
+                            }
+                            className="px-1.5 py-0.5 bg-sky-400 text-slate-950 font-bold rounded text-[9px]"
+                          >
+                            Cyan
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setCapWordStyles((prev) => {
+                                const next = { ...prev };
+                                delete next[selectedWordIdx];
+                                return next;
+                              });
+                            }}
+                            className="px-1.5 py-0.5 bg-slate-800 hover:bg-rose-500/30 text-slate-300 rounded text-[9px]"
+                          >
+                            Clear
+                          </button>
+                        </div>
+                      </div>
+
+                      <div className="grid grid-cols-3 gap-2 text-[10px]">
+                        <div className="bg-slate-950 border border-slate-800 rounded px-2 py-1 flex items-center justify-between">
+                          <span className="text-slate-400">Word Color</span>
+                          <input
+                            type="color"
+                            value={capWordStyles[selectedWordIdx]?.color || capColor}
+                            onChange={(e) =>
+                              setCapWordStyles((prev) => ({
+                                ...prev,
+                                [selectedWordIdx]: { ...prev[selectedWordIdx], color: e.target.value },
+                              }))
+                            }
+                            className="w-4 h-4 bg-transparent cursor-pointer"
+                          />
+                        </div>
+                        <div className="bg-slate-950 border border-slate-800 rounded px-2 py-1 flex items-center justify-between">
+                          <span className="text-slate-400">Pill Box</span>
+                          <input
+                            type="color"
+                            value={capWordStyles[selectedWordIdx]?.bgColor || '#000000'}
+                            onChange={(e) =>
+                              setCapWordStyles((prev) => ({
+                                ...prev,
+                                [selectedWordIdx]: { ...prev[selectedWordIdx], bgColor: e.target.value },
+                              }))
+                            }
+                            className="w-4 h-4 bg-transparent cursor-pointer"
+                          />
+                        </div>
+                        <div className="bg-slate-950 border border-slate-800 rounded px-2 py-1 flex items-center justify-between">
+                          <span className="text-slate-400">Glow</span>
+                          <input
+                            type="color"
+                            value={capWordStyles[selectedWordIdx]?.glowColor || capShadowColor}
+                            onChange={(e) =>
+                              setCapWordStyles((prev) => ({
+                                ...prev,
+                                [selectedWordIdx]: { ...prev[selectedWordIdx], glowColor: e.target.value },
+                              }))
+                            }
+                            className="w-4 h-4 bg-transparent cursor-pointer"
+                          />
+                        </div>
+                      </div>
+
+                      <div className="flex items-center justify-between gap-2 pt-0.5">
+                        <div className="flex items-center gap-1">
+                          <button
+                            type="button"
+                            onClick={() =>
+                              setCapWordStyles((prev) => ({
+                                ...prev,
+                                [selectedWordIdx]: {
+                                  ...prev[selectedWordIdx],
+                                  bold: !(prev[selectedWordIdx]?.bold ?? capBold),
+                                },
+                              }))
+                            }
+                            className={`px-2 py-0.5 rounded text-[10px] font-bold border ${
+                              capWordStyles[selectedWordIdx]?.bold
+                                ? 'bg-amber-400 text-slate-950 border-amber-400'
+                                : 'bg-slate-950 text-slate-300 border-slate-800'
+                            }`}
+                          >
+                            B
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() =>
+                              setCapWordStyles((prev) => ({
+                                ...prev,
+                                [selectedWordIdx]: {
+                                  ...prev[selectedWordIdx],
+                                  italic: !prev[selectedWordIdx]?.italic,
+                                },
+                              }))
+                            }
+                            className={`px-2 py-0.5 rounded text-[10px] italic border ${
+                              capWordStyles[selectedWordIdx]?.italic
+                                ? 'bg-amber-400 text-slate-950 border-amber-400'
+                                : 'bg-slate-950 text-slate-300 border-slate-800'
+                            }`}
+                          >
+                            I
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() =>
+                              setCapWordStyles((prev) => ({
+                                ...prev,
+                                [selectedWordIdx]: {
+                                  ...prev[selectedWordIdx],
+                                  underline: !prev[selectedWordIdx]?.underline,
+                                },
+                              }))
+                            }
+                            className={`px-2 py-0.5 rounded text-[10px] underline border ${
+                              capWordStyles[selectedWordIdx]?.underline
+                                ? 'bg-amber-400 text-slate-950 border-amber-400'
+                                : 'bg-slate-950 text-slate-300 border-slate-800'
+                            }`}
+                          >
+                            U
+                          </button>
+                        </div>
+
+                        <div className="flex items-center gap-1.5 flex-1">
+                          <span className="text-[9px] text-slate-400 whitespace-nowrap">Scale:</span>
+                          <input
+                            type="range"
+                            min={0.7}
+                            max={1.8}
+                            step={0.05}
+                            value={capWordStyles[selectedWordIdx]?.scale || 1}
+                            onChange={(e) =>
+                              setCapWordStyles((prev) => ({
+                                ...prev,
+                                [selectedWordIdx]: {
+                                  ...prev[selectedWordIdx],
+                                  scale: Number(e.target.value),
+                                },
+                              }))
+                            }
+                            className="w-full accent-amber-400 h-1 bg-slate-800 rounded"
+                          />
+                        </div>
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="text-[10px] text-slate-400 bg-slate-900/60 border border-slate-800/80 rounded px-2.5 py-1.5">
+                      👆 Click any word chip above to set individual word color (Yellow, Green, Cyan, etc.), pill box, bold, or scale.
+                    </div>
+                  )}
+                </div>
+
+                {/* 1C. Multiline Caption Text Editor & Segment List */}
+                <div className="bg-slate-950 border border-slate-800 rounded-lg p-3 space-y-2">
+                  <div className="flex items-center justify-between">
+                    <label className="text-[11px] font-semibold text-amber-300">
+                      Caption / Text Content (Single or Multiline)
+                    </label>
+                    <div className="flex items-center gap-1">
+                      <button
+                        type="button"
+                        onClick={() => setCapText((t) => t.toUpperCase())}
+                        className="px-1.5 py-0.5 bg-slate-900 hover:bg-slate-800 text-[9px] text-slate-300 rounded border border-slate-800"
+                      >
+                        UPPER
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setCapText((t) => t.toLowerCase())}
+                        className="px-1.5 py-0.5 bg-slate-900 hover:bg-slate-800 text-[9px] text-slate-300 rounded border border-slate-800"
+                      >
+                        lower
+                      </button>
+                    </div>
+                  </div>
+                  <textarea
+                    rows={2}
+                    value={capText}
+                    onChange={(e) => setCapText(e.target.value)}
+                    placeholder="Type spoken caption or multiline lyrics (press Enter or use | for new line)..."
+                    className="w-full bg-slate-900 border border-slate-700 focus:border-amber-400 rounded-md px-2.5 py-1.5 text-xs text-slate-100 focus:outline-none resize-y"
+                  />
+                  <div className="grid grid-cols-2 gap-2">
+                    <div className="bg-slate-900 border border-slate-800 rounded px-2 py-1 flex items-center justify-between">
+                      <span className="text-[10px] text-slate-400">Start Time:</span>
+                      <span className="text-[11px] font-mono text-sky-400">{playheadTime.toFixed(2)}s</span>
+                    </div>
+                    <div className="bg-slate-900 border border-slate-800 rounded px-2 py-1 flex items-center justify-between">
+                      <span className="text-[10px] text-slate-400">Duration (s):</span>
+                      <input
+                        type="number"
+                        step={0.2}
+                        min={0.1}
+                        value={capDuration}
+                        onChange={(e) => setCapDuration(Math.max(0.1, Number(e.target.value) || 3))}
+                        className="w-14 bg-slate-950 border border-slate-700 rounded px-1.5 py-0.5 text-right font-mono text-xs text-amber-300 focus:outline-none"
+                      />
+                    </div>
+                  </div>
+                </div>
+
+                {/* 1D. Timeline Caption Segments Manager */}
+                <div className="bg-slate-950 border border-slate-800 rounded-lg p-3 flex-1 flex flex-col min-h-[120px]">
+                  <div className="flex items-center justify-between mb-1.5">
+                    <span className="text-[11px] font-semibold text-slate-200">
+                      Timeline Caption Segments ({clips.filter((c) => c.type === 'caption').length})
+                    </span>
+                    <span className="text-[10px] text-emerald-400">Click Segment to Edit</span>
+                  </div>
+                  <div className="flex-1 overflow-y-auto space-y-1 max-h-36 pr-1">
+                    {clips
+                      .filter((c) => c.type === 'caption')
+                      .sort((a, b) => a.startTime - b.startTime)
+                      .map((capClip, idx) => {
+                        const isSel = selectedClipIds.includes(capClip.id);
+                        return (
+                          <button
+                            key={capClip.id}
+                            type="button"
+                            onClick={() => {
+                              onSelectClip(capClip.id, false);
+                              setPlayheadTime(capClip.startTime + 0.05);
+                              setCapText(capClip.textContent || capClip.name);
+                              setCapDuration(capClip.duration);
+                              if (capClip.textStyle) {
+                                setCapPreset(capClip.textStyle.captionPreset || 'YellowVoiceSync');
+                                setCapFontFamily(capClip.textStyle.fontFamily);
+                                setCapFontSize(capClip.textStyle.fontSize);
+                                setCapColor(capClip.textStyle.color);
+                                setCapStrokeColor(capClip.textStyle.strokeColor);
+                                setCapStrokeWidth(capClip.textStyle.strokeWidth);
+                                setCapShadowColor(capClip.textStyle.shadowColor);
+                                setCapShadowBlur(capClip.textStyle.shadowBlur);
+                                setCapBgColor(capClip.textStyle.backgroundColor);
+                                setCapBgOpacity(capClip.textStyle.backgroundOpacity);
+                                if (capClip.textStyle.activeWordColor) {
+                                  setCapActiveWordColor(capClip.textStyle.activeWordColor);
+                                }
+                                if (capClip.textStyle.activeWordBgColor) {
+                                  setCapActiveWordBgColor(capClip.textStyle.activeWordBgColor);
+                                }
+                                if (capClip.textStyle.activeWordScale) {
+                                  setCapActiveWordScale(capClip.textStyle.activeWordScale);
+                                }
+                                setCapWordStyles(capClip.textStyle.wordStyles || {});
+                              }
+                            }}
+                            className={`w-full text-left px-2.5 py-1.5 rounded border text-xs flex items-center justify-between gap-2 transition-colors ${
+                              isSel
+                                ? 'bg-amber-400/20 border-amber-400 text-amber-200 font-semibold'
+                                : 'bg-slate-900 border-slate-800 text-slate-300 hover:bg-slate-800'
+                            }`}
+                          >
+                            <span className="truncate">
+                              #{idx + 1} · {capClip.textContent || capClip.name}
+                            </span>
+                            <span className="text-[10px] font-mono text-sky-400 shrink-0">
+                              {capClip.startTime.toFixed(1)}s - {(capClip.startTime + capClip.duration).toFixed(1)}s
+                            </span>
+                          </button>
+                        );
+                      })}
+                    {clips.filter((c) => c.type === 'caption').length === 0 && (
+                      <div className="text-[11px] text-slate-500 text-center py-4">
+                        No captions yet. Click &ldquo;Trace Video Voice&rdquo; or &ldquo;+ Add Caption&rdquo;.
+                      </div>
+                    )}
+                  </div>
+                </div>
+              </div>
+
+              {/* COLUMN 2 (4 cols): Ready-Made Voice-Sync Formats (Yellow & Green Mandatory), Active Spoken Word Color & Font Studio */}
+              <div className="lg:col-span-4 flex flex-col gap-3">
+                {/* 2A. Ready-Made Word-by-Word & Multiline Voice-Sync Formats (Yellow & Green Highlighted) */}
+                <div className="bg-slate-950 border border-amber-500/40 rounded-lg p-3 space-y-2">
+                  <div className="flex items-center justify-between">
+                    <label className="text-[11px] font-bold text-amber-300">
+                      Ready-Made Word-by-Word & Multiline Voice-Sync Formats
+                    </label>
+                    <span className="px-1.5 py-0.5 rounded bg-emerald-500/20 text-emerald-300 border border-emerald-500/40 text-[9px] font-mono">
+                      YELLOW & GREEN SYNC
+                    </span>
+                  </div>
+                  <div className="grid grid-cols-2 gap-1.5 max-h-60 overflow-y-auto pr-0.5">
+                    {VOICE_SYNC_CAPTION_FORMATS.map((fmt) => {
+                      const isActive = capPreset === fmt.id;
+                      const isYellowOrGreen =
+                        fmt.id.includes('Yellow') || fmt.id.includes('Green');
+                      return (
+                        <button
+                          key={fmt.id}
+                          type="button"
+                          onClick={() => {
+                            setCapPreset(fmt.id);
+                            setCapColor(fmt.baseColor);
+                            setCapActiveWordColor(fmt.activeWordColor);
+                            setCapActiveWordBgColor(fmt.activeWordBgColor || 'transparent');
+                            if (fmt.activeWordGlowColor) {
+                              setCapActiveWordGlowColor(fmt.activeWordGlowColor);
+                              setCapShadowColor(fmt.activeWordGlowColor);
+                            }
+                            if (fmt.isMultiline && !capText.includes('\n') && !capText.includes('|')) {
+                              const words = capText.trim().split(/\s+/);
+                              if (words.length > 3) {
+                                const mid = Math.ceil(words.length / 2);
+                                setCapText(`${words.slice(0, mid).join(' ')}\n${words.slice(mid).join(' ')}`);
+                              }
+                            }
+                          }}
+                          className={`p-2 rounded-md border text-left transition-all ${
+                            isActive
+                              ? 'bg-amber-400/20 border-amber-400 text-amber-100 shadow-xs ring-1 ring-amber-400/50'
+                              : isYellowOrGreen
+                              ? 'bg-slate-900/95 border-emerald-500/40 text-slate-200 hover:border-amber-400'
+                              : 'bg-slate-900 border-slate-800 text-slate-300 hover:border-slate-700'
+                          }`}
+                        >
+                          <div className="flex items-center justify-between gap-1">
+                            <span className="text-[11px] font-bold truncate">{fmt.label}</span>
+                            <span className="flex items-center gap-0.5 shrink-0">
+                              <span
+                                className="w-2.5 h-2.5 rounded-full border border-white/30"
+                                style={{ backgroundColor: fmt.activeWordColor }}
+                                title={`Active Spoken Word: ${fmt.activeWordColor}`}
+                              />
+                              <span
+                                className="w-2.5 h-2.5 rounded-full border border-white/30"
+                                style={{ backgroundColor: fmt.baseColor }}
+                                title={`Other Words Base Color: ${fmt.baseColor}`}
+                              />
+                            </span>
+                          </div>
+                          <div className="text-[9px] text-slate-400 truncate mt-0.5">{fmt.desc}</div>
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+
+                {/* 2B. Active Spoken Word Voice-Sync Color & Scale Controls */}
+                <div className="bg-slate-950 border border-emerald-500/40 rounded-lg p-3 space-y-2">
+                  <div className="flex items-center justify-between">
+                    <label className="text-[11px] font-bold text-emerald-300">
+                      Active Spoken Word Color (Voice-Synced Highlight)
+                    </label>
+                    <div className="flex items-center gap-1">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setCapActiveWordColor('#FACC15');
+                          setCapActiveWordBgColor('transparent');
+                        }}
+                        className="px-2 py-0.5 bg-amber-400 text-slate-950 font-extrabold rounded text-[9px]"
+                      >
+                        ⚡ Yellow
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setCapActiveWordColor('#22C55E');
+                          setCapActiveWordBgColor('transparent');
+                        }}
+                        className="px-2 py-0.5 bg-emerald-400 text-slate-950 font-extrabold rounded text-[9px]"
+                      >
+                        ⚡ Green
+                      </button>
+                    </div>
+                  </div>
+
+                  <div className="grid grid-cols-3 gap-2 text-[10px]">
+                    <div className="bg-slate-900 border border-slate-800 rounded px-2 py-1.5 flex items-center justify-between">
+                      <span className="text-slate-300">Spoken Word</span>
+                      <input
+                        type="color"
+                        value={capActiveWordColor}
+                        onChange={(e) => setCapActiveWordColor(e.target.value)}
+                        className="w-5 h-5 bg-transparent cursor-pointer"
+                      />
+                    </div>
+                    <div className="bg-slate-900 border border-slate-800 rounded px-2 py-1.5 flex items-center justify-between">
+                      <span className="text-slate-300">Other Words</span>
+                      <input
+                        type="color"
+                        value={capColor}
+                        onChange={(e) => setCapColor(e.target.value)}
+                        className="w-5 h-5 bg-transparent cursor-pointer"
+                      />
+                    </div>
+                    <div className="bg-slate-900 border border-slate-800 rounded px-2 py-1.5 flex items-center justify-between">
+                      <span className="text-slate-300">Word Pill BG</span>
+                      <div className="flex items-center gap-1">
+                        <input
+                          type="color"
+                          value={capActiveWordBgColor === 'transparent' ? '#FACC15' : capActiveWordBgColor}
+                          onChange={(e) => setCapActiveWordBgColor(e.target.value)}
+                          className="w-4 h-4 bg-transparent cursor-pointer"
+                        />
+                        {capActiveWordBgColor !== 'transparent' && (
+                          <button
+                            type="button"
+                            onClick={() => setCapActiveWordBgColor('transparent')}
+                            className="text-[9px] text-rose-400 hover:text-rose-300"
+                            title="Clear Word Pill Background"
+                          >
+                            ✕
+                          </button>
+                        )}
+                      </div>
+                    </div>
+                  </div>
+
+                  <div>
+                    <div className="flex justify-between text-[10px] mb-0.5">
+                      <span className="text-slate-400">Active Spoken Word Pop Scale</span>
+                      <span className="font-mono text-emerald-300">{Math.round(capActiveWordScale * 100)}%</span>
+                    </div>
+                    <input
+                      type="range"
+                      min={1.0}
+                      max={1.5}
+                      step={0.02}
+                      value={capActiveWordScale}
+                      onChange={(e) => setCapActiveWordScale(Number(e.target.value))}
+                      className="w-full accent-emerald-400 h-1.5 bg-slate-800 rounded"
+                    />
+                  </div>
+                </div>
+
+                {/* 2C. Font Family & Custom Font Upload (.TTF / .OTF / Google Fonts) + Typography */}
+                <div className="bg-slate-950 border border-slate-800 rounded-lg p-3 space-y-2.5">
+                  <div className="flex items-center justify-between">
+                    <label className="text-[11px] font-semibold text-purple-300">
+                      Font Family, Custom .TTF/.OTF & Typography
+                    </label>
+                    <button
+                      type="button"
+                      onClick={() => toolbarFontInputRef.current?.click()}
+                      className="px-2 py-0.5 bg-emerald-500/20 hover:bg-emerald-500 text-emerald-300 hover:text-slate-950 border border-emerald-500/40 rounded text-[10px] font-semibold flex items-center gap-1 transition-colors"
+                    >
+                      <Upload className="w-3 h-3" /> Upload .TTF / .OTF
+                    </button>
+                  </div>
+
+                  <select
+                    value={capFontFamily}
+                    onChange={(e) => setCapFontFamily(e.target.value)}
+                    style={{ fontFamily: capFontFamily }}
+                    className="w-full bg-slate-900 border border-slate-700 rounded-md px-2.5 py-1.5 text-xs text-slate-100 focus:outline-none focus:border-purple-400"
+                  >
+                    {availableFonts.map((f) => (
+                      <option key={f} value={f} style={{ fontFamily: f }}>
+                        {f}
+                      </option>
+                    ))}
+                  </select>
+
+                  <div className="flex items-center gap-1.5">
+                    <input
+                      type="text"
+                      value={newFontNameDraft}
+                      onChange={(e) => setNewFontNameDraft(e.target.value)}
+                      placeholder="Add Google/Studio Font (e.g. Bebas Neue, Poppins)..."
+                      className="flex-1 bg-slate-900 border border-slate-800 rounded px-2 py-1 text-[11px] text-slate-200 focus:outline-none focus:border-purple-400"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => {
+                        if (!newFontNameDraft.trim()) return;
+                        onAddCustomFont?.(newFontNameDraft.trim());
+                        setCapFontFamily(newFontNameDraft.trim());
+                        setNewFontNameDraft('');
+                      }}
+                      className="px-2.5 py-1 bg-purple-500 hover:bg-purple-400 text-slate-950 font-bold rounded text-[11px] whitespace-nowrap"
+                    >
+                      + Add Font
+                    </button>
+                  </div>
+
+                  <div className="space-y-1 pt-1">
+                    <div className="flex justify-between text-[10px]">
+                      <span className="text-slate-400">Font Size (Limitless px)</span>
+                      <span className="font-mono text-slate-200">{capFontSize}px</span>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <input
+                        type="range"
+                        min={10}
+                        max={160}
+                        value={Math.min(160, capFontSize)}
+                        onChange={(e) => setCapFontSize(Number(e.target.value))}
+                        className="flex-1 accent-amber-400 h-1.5 bg-slate-800 rounded"
+                      />
+                      <input
+                        type="number"
+                        min={6}
+                        value={capFontSize}
+                        onChange={(e) => setCapFontSize(Math.max(6, Number(e.target.value) || 38))}
+                        className="w-14 bg-slate-900 border border-slate-800 rounded px-1.5 py-0.5 text-xs font-mono text-slate-100 text-right"
+                      />
+                    </div>
+                  </div>
+
+                  <div className="flex items-center justify-between gap-2 pt-1">
+                    <div className="flex items-center gap-1 bg-slate-900 border border-slate-800 rounded p-1">
+                      <button
+                        type="button"
+                        onClick={() => setCapBold((b) => !b)}
+                        className={`px-2.5 py-0.5 rounded text-xs font-bold ${
+                          capBold ? 'bg-amber-400 text-slate-950' : 'text-slate-400 hover:text-white'
+                        }`}
+                      >
+                        B
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setCapItalic((i) => !i)}
+                        className={`px-2.5 py-0.5 rounded text-xs italic ${
+                          capItalic ? 'bg-amber-400 text-slate-950' : 'text-slate-400 hover:text-white'
+                        }`}
+                      >
+                        I
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setCapUnderline((u) => !u)}
+                        className={`px-2.5 py-0.5 rounded text-xs underline ${
+                          capUnderline ? 'bg-amber-400 text-slate-950' : 'text-slate-400 hover:text-white'
+                        }`}
+                      >
+                        U
+                      </button>
+                    </div>
+
+                    <div className="flex items-center gap-1 bg-slate-900 border border-slate-800 rounded p-1">
+                      {(['left', 'center', 'right'] as const).map((al) => (
+                        <button
+                          key={al}
+                          type="button"
+                          onClick={() => setCapAlign(al)}
+                          className={`px-2 py-0.5 rounded text-[11px] capitalize ${
+                            capAlign === al
+                              ? 'bg-sky-500 text-slate-950 font-bold'
+                              : 'text-slate-400 hover:text-white'
+                          }`}
+                        >
+                          {al}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+
+                  <div className="grid grid-cols-2 gap-2 pt-1">
+                    <div>
+                      <div className="flex justify-between text-[10px] mb-1">
+                        <span className="text-slate-400">Letter Spacing</span>
+                        <span className="font-mono text-slate-200">{capLetterSpacing}px</span>
+                      </div>
+                      <input
+                        type="range"
+                        min={-4}
+                        max={25}
+                        step={0.5}
+                        value={capLetterSpacing}
+                        onChange={(e) => setCapLetterSpacing(Number(e.target.value))}
+                        className="w-full accent-sky-400 h-1.5 bg-slate-800 rounded"
+                      />
+                    </div>
+                    <div>
+                      <div className="flex justify-between text-[10px] mb-1">
+                        <span className="text-slate-400">Line Height</span>
+                        <span className="font-mono text-slate-200">{capLineHeight.toFixed(2)}</span>
+                      </div>
+                      <input
+                        type="range"
+                        min={0.8}
+                        max={2.4}
+                        step={0.05}
+                        value={capLineHeight}
+                        onChange={(e) => setCapLineHeight(Number(e.target.value))}
+                        className="w-full accent-sky-400 h-1.5 bg-slate-800 rounded"
+                      />
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              {/* COLUMN 3 (4 cols): Advanced Colors, Stroke, Neon Glow, Background Box, Transform & Full Motion Animations */}
+              <div className="lg:col-span-4 flex flex-col gap-3">
+                {/* 3A. Colors, Stroke, Neon Glow & Background Box */}
+                <div className="bg-slate-950 border border-slate-800 rounded-lg p-3 space-y-2.5">
+                  <label className="text-[11px] font-semibold text-emerald-300 block">
+                    Base Colors, Outline Stroke, Neon Glow & Box
+                  </label>
+
+                  <div className="grid grid-cols-2 gap-2 text-[11px]">
+                    <div className="bg-slate-900 border border-slate-800 rounded px-2 py-1.5 flex items-center justify-between">
+                      <span className="text-slate-300">Base Text</span>
+                      <div className="flex items-center gap-1.5">
+                        <input
+                          type="color"
+                          value={capColor}
+                          onChange={(e) => setCapColor(e.target.value)}
+                          className="w-5 h-5 bg-transparent cursor-pointer"
+                        />
+                        <span className="font-mono text-[10px] text-slate-400">{capColor}</span>
+                      </div>
+                    </div>
+
+                    <div className="bg-slate-900 border border-slate-800 rounded px-2 py-1.5 flex items-center justify-between">
+                      <span className="text-slate-300">Stroke Color</span>
+                      <div className="flex items-center gap-1.5">
+                        <input
+                          type="color"
+                          value={capStrokeColor}
+                          onChange={(e) => setCapStrokeColor(e.target.value)}
+                          className="w-5 h-5 bg-transparent cursor-pointer"
+                        />
+                        <span className="font-mono text-[10px] text-slate-400">{capStrokeColor}</span>
+                      </div>
+                    </div>
+
+                    <div className="bg-slate-900 border border-slate-800 rounded px-2 py-1.5 flex items-center justify-between">
+                      <span className="text-slate-300">Glow / Shadow</span>
+                      <div className="flex items-center gap-1.5">
+                        <input
+                          type="color"
+                          value={capShadowColor}
+                          onChange={(e) => setCapShadowColor(e.target.value)}
+                          className="w-5 h-5 bg-transparent cursor-pointer"
+                        />
+                        <span className="font-mono text-[10px] text-slate-400">{capShadowColor}</span>
+                      </div>
+                    </div>
+
+                    <div className="bg-slate-900 border border-slate-800 rounded px-2 py-1.5 flex items-center justify-between">
+                      <span className="text-slate-300">Box BG Color</span>
+                      <div className="flex items-center gap-1.5">
+                        <input
+                          type="color"
+                          value={capBgColor}
+                          onChange={(e) => setCapBgColor(e.target.value)}
+                          className="w-5 h-5 bg-transparent cursor-pointer"
+                        />
+                        <span className="font-mono text-[10px] text-slate-400">{capBgColor}</span>
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Stroke Width & Glow Blur Sliders */}
+                  <div className="grid grid-cols-2 gap-2">
+                    <div>
+                      <div className="flex justify-between text-[10px] mb-0.5">
+                        <span className="text-slate-400">Stroke Width</span>
+                        <span className="font-mono text-slate-200">{capStrokeWidth}px</span>
+                      </div>
+                      <input
+                        type="range"
+                        min={0}
+                        max={16}
+                        step={0.5}
+                        value={capStrokeWidth}
+                        onChange={(e) => setCapStrokeWidth(Number(e.target.value))}
+                        className="w-full accent-amber-400 h-1.5 bg-slate-800 rounded"
+                      />
+                    </div>
+                    <div>
+                      <div className="flex justify-between text-[10px] mb-0.5">
+                        <span className="text-slate-400">Neon Glow Blur</span>
+                        <span className="font-mono text-slate-200">{capShadowBlur}px</span>
+                      </div>
+                      <input
+                        type="range"
+                        min={0}
+                        max={50}
+                        value={capShadowBlur}
+                        onChange={(e) => setCapShadowBlur(Number(e.target.value))}
+                        className="w-full accent-sky-400 h-1.5 bg-slate-800 rounded"
+                      />
+                    </div>
+                  </div>
+
+                  {/* BG Opacity, Padding & Corner Radius */}
+                  <div className="grid grid-cols-3 gap-2">
+                    <div>
+                      <div className="flex justify-between text-[10px] mb-0.5">
+                        <span className="text-slate-400">BG Opacity</span>
+                        <span className="font-mono text-slate-200">{capBgOpacity}%</span>
+                      </div>
+                      <input
+                        type="range"
+                        min={0}
+                        max={100}
+                        value={capBgOpacity}
+                        onChange={(e) => setCapBgOpacity(Number(e.target.value))}
+                        className="w-full accent-emerald-400 h-1.5 bg-slate-800 rounded"
+                      />
+                    </div>
+                    <div>
+                      <div className="flex justify-between text-[10px] mb-0.5">
+                        <span className="text-slate-400">Box Padding</span>
+                        <span className="font-mono text-slate-200">{capPadding}px</span>
+                      </div>
+                      <input
+                        type="range"
+                        min={0}
+                        max={40}
+                        value={capPadding}
+                        onChange={(e) => setCapPadding(Number(e.target.value))}
+                        className="w-full accent-emerald-400 h-1.5 bg-slate-800 rounded"
+                      />
+                    </div>
+                    <div>
+                      <div className="flex justify-between text-[10px] mb-0.5">
+                        <span className="text-slate-400">Box Radius</span>
+                        <span className="font-mono text-slate-200">{capCornerRadius}px</span>
+                      </div>
+                      <input
+                        type="range"
+                        min={0}
+                        max={36}
+                        value={capCornerRadius}
+                        onChange={(e) => setCapCornerRadius(Number(e.target.value))}
+                        className="w-full accent-emerald-400 h-1.5 bg-slate-800 rounded"
+                      />
+                    </div>
+                  </div>
+                </div>
+
+                {/* 3B. Screen Position, X/Y Offset, Scale, Rotation & Opacity */}
+                <div className="bg-slate-950 border border-slate-800 rounded-lg p-3 space-y-2">
+                  <div className="flex items-center justify-between">
+                    <label className="text-[11px] font-semibold text-amber-300">
+                      Screen Position & Transform
+                    </label>
+                    <div className="flex items-center gap-1 bg-slate-900 border border-slate-800 rounded p-0.5">
+                      {(['bottom', 'center', 'top'] as const).map((pos) => (
+                        <button
+                          key={pos}
+                          type="button"
+                          onClick={() => {
+                            setCapPosition(pos);
+                            setCapPosYOffset(0);
+                          }}
+                          className={`px-2 py-0.5 rounded text-[10px] capitalize ${
+                            capPosition === pos
+                              ? 'bg-sky-500 text-slate-950 font-bold'
+                              : 'text-slate-400 hover:text-white'
+                          }`}
+                        >
+                          {pos}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+
+                  <div className="grid grid-cols-2 gap-2">
+                    <div>
+                      <div className="flex justify-between text-[10px] mb-0.5">
+                        <span className="text-slate-400">Offset X</span>
+                        <span className="font-mono text-slate-200">{capPosX}px</span>
+                      </div>
+                      <input
+                        type="range"
+                        min={-300}
+                        max={300}
+                        value={capPosX}
+                        onChange={(e) => setCapPosX(Number(e.target.value))}
+                        className="w-full accent-sky-400 h-1.5 bg-slate-800 rounded"
+                      />
+                    </div>
+                    <div>
+                      <div className="flex justify-between text-[10px] mb-0.5">
+                        <span className="text-slate-400">Fine Offset Y</span>
+                        <span className="font-mono text-slate-200">{capPosYOffset}px</span>
+                      </div>
+                      <input
+                        type="range"
+                        min={-220}
+                        max={220}
+                        value={capPosYOffset}
+                        onChange={(e) => setCapPosYOffset(Number(e.target.value))}
+                        className="w-full accent-sky-400 h-1.5 bg-slate-800 rounded"
+                      />
+                    </div>
+                    <div>
+                      <div className="flex justify-between text-[10px] mb-0.5">
+                        <span className="text-slate-400">Scale (%)</span>
+                        <span className="font-mono text-slate-200">{capScale}%</span>
+                      </div>
+                      <input
+                        type="range"
+                        min={25}
+                        max={250}
+                        value={capScale}
+                        onChange={(e) => setCapScale(Number(e.target.value))}
+                        className="w-full accent-amber-400 h-1.5 bg-slate-800 rounded"
+                      />
+                    </div>
+                    <div>
+                      <div className="flex justify-between text-[10px] mb-0.5">
+                        <span className="text-slate-400">Rotation / Opacity</span>
+                        <span className="font-mono text-slate-200">{capRotation}° · {capOpacity}%</span>
+                      </div>
+                      <div className="flex items-center gap-1">
+                        <input
+                          type="range"
+                          min={-180}
+                          max={180}
+                          value={capRotation}
+                          onChange={(e) => setCapRotation(Number(e.target.value))}
+                          className="w-1/2 accent-purple-400 h-1.5 bg-slate-800 rounded"
+                          title="Rotation (-180° to +180°)"
+                        />
+                        <input
+                          type="range"
+                          min={10}
+                          max={100}
+                          value={capOpacity}
+                          onChange={(e) => setCapOpacity(Number(e.target.value))}
+                          className="w-1/2 accent-emerald-400 h-1.5 bg-slate-800 rounded"
+                          title="Opacity (10% to 100%)"
+                        />
+                      </div>
+                    </div>
+                  </div>
+                </div>
+
+                {/* 3C. In / Out / Loop Motion Animations */}
+                <div className="bg-slate-950 border border-purple-500/40 rounded-lg p-3 space-y-2">
+                  <label className="text-[11px] font-bold text-purple-300 block">
+                    Text & Caption Motion Animations (In / Out / Loop)
+                  </label>
+                  <div className="grid grid-cols-3 gap-2 text-[10px]">
+                    <div>
+                      <span className="text-slate-400 block mb-1">In Animation</span>
+                      <select
+                        value={capAnimIn}
+                        onChange={(e) => setCapAnimIn(e.target.value)}
+                        className="w-full bg-slate-900 border border-slate-800 rounded px-1.5 py-1 text-slate-100 focus:outline-none"
+                      >
+                        {BUILTIN_ANIMATIONS.map((a) => (
+                          <option key={a} value={a}>
+                            {a}
+                          </option>
+                        ))}
+                        {ONLINE_ANIMATION_CATALOG.filter((a) => a.target === 'in').map((a) => (
+                          <option key={a.id} value={a.id}>
+                            ✦ {a.name}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                    <div>
+                      <span className="text-slate-400 block mb-1">Out Animation</span>
+                      <select
+                        value={capAnimOut}
+                        onChange={(e) => setCapAnimOut(e.target.value)}
+                        className="w-full bg-slate-900 border border-slate-800 rounded px-1.5 py-1 text-slate-100 focus:outline-none"
+                      >
+                        {BUILTIN_ANIMATIONS.map((a) => (
+                          <option key={a} value={a}>
+                            {a}
+                          </option>
+                        ))}
+                        {ONLINE_ANIMATION_CATALOG.filter((a) => a.target === 'out').map((a) => (
+                          <option key={a.id} value={a.id}>
+                            ✦ {a.name}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                    <div>
+                      <span className="text-slate-400 block mb-1">Loop Motion</span>
+                      <select
+                        value={capAnimLoop}
+                        onChange={(e) => setCapAnimLoop(e.target.value)}
+                        className="w-full bg-slate-900 border border-slate-800 rounded px-1.5 py-1 text-slate-100 focus:outline-none"
+                      >
+                        {BUILTIN_LOOP_ANIMATIONS.map((a) => (
+                          <option key={a} value={a}>
+                            {a}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            {/* Window Footer Actions */}
+            <div className="px-4 py-3 bg-slate-950 border-t border-slate-800 flex flex-wrap items-center justify-between gap-2 shrink-0">
+              <div className="flex flex-wrap items-center gap-3">
+                <label className="flex items-center gap-2 text-xs font-bold text-emerald-300 cursor-pointer select-none bg-emerald-500/15 border border-emerald-500/40 px-3 py-1.5 rounded-md">
+                  <input
+                    type="checkbox"
+                    checked={applyToAllCaptionsChecked}
+                    onChange={(e) => setApplyToAllCaptionsChecked(e.target.checked)}
+                    className="w-3.5 h-3.5 accent-emerald-400 rounded cursor-pointer"
+                  />
+                  <span>✓ Apply Same Settings to ALL Captions on Timeline</span>
+                </label>
+
+                <button
+                  type="button"
+                  onClick={() => {
+                    onAddOrUpdateCaptionFull?.({
+                      text: capText,
+                      stylePreset: capPreset,
+                      fontFamily: capFontFamily,
+                      fontSize: capFontSize,
+                      color: capColor,
+                      strokeColor: capStrokeColor,
+                      strokeWidth: capStrokeWidth,
+                      shadowColor: capShadowColor,
+                      shadowBlur: capShadowBlur,
+                      shadowOpacity: capShadowOpacity,
+                      shadowOffsetX: capShadowOffsetX,
+                      shadowOffsetY: capShadowOffsetY,
+                      backgroundColor: capBgColor,
+                      backgroundOpacity: capBgOpacity,
+                      padding: capPadding,
+                      cornerRadius: capCornerRadius,
+                      letterSpacing: capLetterSpacing,
+                      lineHeight: capLineHeight,
+                      align: capAlign,
+                      bold: capBold,
+                      italic: capItalic,
+                      underline: capUnderline,
+                      positionPreset: capPosition,
+                      positionX: capPosX,
+                      positionYOffset: capPosYOffset,
+                      scale: capScale,
+                      rotation: capRotation,
+                      opacity: capOpacity,
+                      animationIn: capAnimIn,
+                      animationOut: capAnimOut,
+                      animationLoop: capAnimLoop,
+                      duration: capDuration,
+                      activeWordColor: capActiveWordColor,
+                      activeWordBgColor: capActiveWordBgColor,
+                      activeWordScale: capActiveWordScale,
+                      wordStyles: capWordStyles,
+                      updateSelected: false,
+                      applyToAllCaptions: true,
+                    });
+                  }}
+                  className="px-3 py-1.5 bg-purple-500/20 hover:bg-purple-500 text-purple-200 hover:text-slate-950 border border-purple-500/40 rounded-md text-xs font-bold flex items-center gap-1.5 transition-colors"
+                  title="Immediately sync these Font, Voice-Sync Color & Animation settings to ALL Captions on the timeline"
+                >
+                  <Sparkles className="w-3.5 h-3.5" />
+                  <span>Sync Style to ALL Captions Now</span>
+                </button>
+              </div>
+
+              <div className="flex flex-wrap items-center gap-2">
+                {activeOrSelectedClip &&
+                  (activeOrSelectedClip.type === 'caption' || activeOrSelectedClip.type === 'text') && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        onAddOrUpdateCaptionFull?.({
+                          text: capText,
+                          stylePreset: capPreset,
+                          fontFamily: capFontFamily,
+                          fontSize: capFontSize,
+                          color: capColor,
+                          strokeColor: capStrokeColor,
+                          strokeWidth: capStrokeWidth,
+                          shadowColor: capShadowColor,
+                          shadowBlur: capShadowBlur,
+                          shadowOpacity: capShadowOpacity,
+                          shadowOffsetX: capShadowOffsetX,
+                          shadowOffsetY: capShadowOffsetY,
+                          backgroundColor: capBgColor,
+                          backgroundOpacity: capBgOpacity,
+                          padding: capPadding,
+                          cornerRadius: capCornerRadius,
+                          letterSpacing: capLetterSpacing,
+                          lineHeight: capLineHeight,
+                          align: capAlign,
+                          bold: capBold,
+                          italic: capItalic,
+                          underline: capUnderline,
+                          positionPreset: capPosition,
+                          positionX: capPosX,
+                          positionYOffset: capPosYOffset,
+                          scale: capScale,
+                          rotation: capRotation,
+                          opacity: capOpacity,
+                          animationIn: capAnimIn,
+                          animationOut: capAnimOut,
+                          animationLoop: capAnimLoop,
+                          duration: capDuration,
+                          activeWordColor: capActiveWordColor,
+                          activeWordBgColor: capActiveWordBgColor,
+                          activeWordScale: capActiveWordScale,
+                          wordStyles: capWordStyles,
+                          updateSelected: true,
+                          applyToAllCaptions: applyToAllCaptionsChecked,
+                        });
+                      }}
+                      className="px-4 py-1.5 bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold rounded-md text-xs flex items-center gap-1.5 shadow-sm transition-colors"
+                    >
+                      <Check className="w-3.5 h-3.5" />
+                      <span>
+                        {applyToAllCaptionsChecked
+                          ? 'Update Selected & Apply to ALL Captions'
+                          : 'Update Selected Segment'}
+                      </span>
+                    </button>
+                  )}
+
+                <button
+                  type="button"
+                  onClick={() => {
+                    onAddOrUpdateCaptionFull?.({
+                      text: capText,
+                      stylePreset: capPreset,
+                      fontFamily: capFontFamily,
+                      fontSize: capFontSize,
+                      color: capColor,
+                      strokeColor: capStrokeColor,
+                      strokeWidth: capStrokeWidth,
+                      shadowColor: capShadowColor,
+                      shadowBlur: capShadowBlur,
+                      shadowOpacity: capShadowOpacity,
+                      shadowOffsetX: capShadowOffsetX,
+                      shadowOffsetY: capShadowOffsetY,
+                      backgroundColor: capBgColor,
+                      backgroundOpacity: capBgOpacity,
+                      padding: capPadding,
+                      cornerRadius: capCornerRadius,
+                      letterSpacing: capLetterSpacing,
+                      lineHeight: capLineHeight,
+                      align: capAlign,
+                      bold: capBold,
+                      italic: capItalic,
+                      underline: capUnderline,
+                      positionPreset: capPosition,
+                      positionX: capPosX,
+                      positionYOffset: capPosYOffset,
+                      scale: capScale,
+                      rotation: capRotation,
+                      opacity: capOpacity,
+                      animationIn: capAnimIn,
+                      animationOut: capAnimOut,
+                      animationLoop: capAnimLoop,
+                      duration: capDuration,
+                      activeWordColor: capActiveWordColor,
+                      activeWordBgColor: capActiveWordBgColor,
+                      activeWordScale: capActiveWordScale,
+                      wordStyles: capWordStyles,
+                      updateSelected: false,
+                      applyToAllCaptions: applyToAllCaptionsChecked,
+                    });
+                  }}
+                  className="px-4 py-1.5 bg-amber-400 hover:bg-amber-300 text-slate-950 font-bold rounded-md text-xs flex items-center gap-1.5 shadow-sm transition-colors"
+                >
+                  <Plus className="w-3.5 h-3.5" />
+                  <span>+ Add Caption to Timeline</span>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => {
+                    setShowCaptionStudioBar(false);
+                    setShowFontStudioWindow(false);
+                  }}
+                  className="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-200 rounded-md text-xs font-medium transition-colors"
+                >
+                  Done
+                </button>
+              </div>
             </div>
           </div>
         </div>
@@ -1423,11 +2751,71 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
           </div>
         </div>
 
-        {/* Right Scrollable Timeline Canvas (Both Horizontal & Vertical Scroll) */}
+        {/* Right Scrollable Timeline Canvas (Both Horizontal & Vertical Scroll + Right-Click Hold Directional Auto-Scroll) */}
         <div
           ref={scrollContainerRef}
           onScroll={handleCanvasScroll}
-          className="flex-1 overflow-auto relative bg-[#090D16]"
+          onContextMenu={(e) => {
+            e.preventDefault();
+          }}
+          onMouseDown={(e) => {
+            if (e.button === 2) {
+              e.preventDefault();
+              e.stopPropagation();
+              const sc = scrollContainerRef.current;
+              if (!sc) return;
+              const originX = e.clientX;
+              const originY = e.clientY;
+              let lastX = e.clientX;
+              let lastY = e.clientY;
+              let vx = 0;
+              let vy = 0;
+              let rafId = 0;
+              setIsRightClickScrolling(true);
+
+              const stepAutoScroll = () => {
+                if (sc && (Math.abs(vx) > 0.15 || Math.abs(vy) > 0.15)) {
+                  sc.scrollLeft += vx;
+                  sc.scrollTop += vy;
+                  if (trackHeadersRef.current) {
+                    trackHeadersRef.current.scrollTop = sc.scrollTop;
+                  }
+                }
+                rafId = requestAnimationFrame(stepAutoScroll);
+              };
+              rafId = requestAnimationFrame(stepAutoScroll);
+
+              const onMove = (mv: MouseEvent) => {
+                const dx = mv.clientX - lastX;
+                const dy = mv.clientY - lastY;
+                lastX = mv.clientX;
+                lastY = mv.clientY;
+                // Instant directional scroll following cursor movement + continuous velocity toward cursor direction
+                sc.scrollLeft += dx * 2.2;
+                sc.scrollTop += dy * 1.8;
+                if (trackHeadersRef.current) {
+                  trackHeadersRef.current.scrollTop = sc.scrollTop;
+                }
+                const offsetFromOriginX = mv.clientX - originX;
+                const offsetFromOriginY = mv.clientY - originY;
+                vx = Math.abs(offsetFromOriginX) > 12 ? offsetFromOriginX * 0.14 : 0;
+                vy = Math.abs(offsetFromOriginY) > 12 ? offsetFromOriginY * 0.12 : 0;
+              };
+
+              const onUp = () => {
+                cancelAnimationFrame(rafId);
+                setIsRightClickScrolling(false);
+                window.removeEventListener('mousemove', onMove);
+                window.removeEventListener('mouseup', onUp);
+              };
+
+              window.addEventListener('mousemove', onMove);
+              window.addEventListener('mouseup', onUp);
+            }
+          }}
+          className={`flex-1 overflow-auto relative bg-[#090D16] ${
+            isRightClickScrolling ? 'cursor-all-scroll select-none' : ''
+          }`}
         >
           <div style={{ width: `${timelineWidthPx}px` }} className="relative min-h-full">
             {/* Sticky Time Ruler (Adaptive step for long-form videos up to multi-hour durations) */}
@@ -1673,6 +3061,14 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
                             e.stopPropagation();
                             const isModifier = multiSelectMode || e.shiftKey || e.ctrlKey || e.metaKey;
                             startClipDrag(e.clientX, e.clientY, isModifier);
+                          }}
+                          onDoubleClick={(e) => {
+                            e.stopPropagation();
+                            if (clip.type === 'caption' || clip.type === 'text') {
+                              setCapText(clip.textContent || clip.name);
+                              setCapDuration(clip.duration || 3);
+                              setShowCaptionStudioBar(true);
+                            }
                           }}
                           onTouchStart={(e) => {
                             e.stopPropagation();
@@ -2026,9 +3422,6 @@ export const TimelinePanel: React.FC<TimelinePanelProps> = ({
           </div>
         </div>
       </div>
-
-      {/* Render Toolbar at Bottom if User Docked It at Bottom */}
-      {toolbarDockEdge === 'bottom' && !isToolbarFreehand && timelineToolbarElement}
     </div>
   );
 };

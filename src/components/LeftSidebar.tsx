@@ -270,7 +270,12 @@ export const LeftSidebar: React.FC<LeftSidebarProps> = ({
           return (
             <button
               key={tab.id}
-              onClick={() => setActiveTab(tab.id)}
+              onClick={() => {
+              setActiveTab(tab.id);
+              if (tab.id === 'Captions') {
+                window.dispatchEvent(new CustomEvent('hve-open-caption-window'));
+              }
+            }}
               className={`w-13 py-2 rounded-md flex flex-col items-center justify-center gap-1 transition-colors ${
                 active
                   ? 'bg-sky-500/15 text-sky-400 border border-sky-500/30'
@@ -979,9 +984,18 @@ export const LeftSidebar: React.FC<LeftSidebarProps> = ({
 
         {activeTab === 'Captions' && (
           <div className="flex flex-col flex-1 min-h-0 p-3 gap-3 overflow-y-auto">
-            <h2 className="text-xs font-semibold text-slate-200 tracking-wide">
-              Auto Lyrics & Speech Captions (Word Glowing & Multiline)
-            </h2>
+            <div className="flex items-center justify-between gap-2">
+              <h2 className="text-xs font-semibold text-slate-200 tracking-wide">
+                Auto Lyrics & Speech Captions
+              </h2>
+              <button
+                type="button"
+                onClick={() => window.dispatchEvent(new CustomEvent('hve-open-caption-window'))}
+                className="px-2.5 py-1 bg-amber-400 hover:bg-amber-300 text-slate-950 font-bold rounded text-[11px] flex items-center gap-1 shadow-xs"
+              >
+                <MessageSquare className="w-3 h-3" /> Open Full Caption Window
+              </button>
+            </div>
 
             <div className="bg-slate-900 border border-sky-500/30 rounded-md p-3 space-y-2.5">
               <div className="flex items-center justify-between">

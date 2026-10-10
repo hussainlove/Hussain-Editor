@@ -41,6 +41,212 @@ export interface ColorAdjustments {
   vignette: number;     // 0 to 100
 }
 
+export interface WordStyleOverride {
+  color?: string;
+  bgColor?: string;
+  strokeColor?: string;
+  glowColor?: string;
+  scale?: number;
+  bold?: boolean;
+  italic?: boolean;
+  underline?: boolean;
+  fontFamily?: string;
+}
+
+export type CaptionPresetType =
+  | 'YellowVoiceSync'
+  | 'GreenVoiceSync'
+  | 'YellowGreenMultiline'
+  | 'MultilineYellowSync'
+  | 'MultilineGreenSync'
+  | 'YellowBoxSync'
+  | 'GreenBoxSync'
+  | 'SingleWordYellowGreen'
+  | 'WordGlowing'
+  | 'Multiline'
+  | 'Karaoke'
+  | 'Highlight'
+  | 'Bold'
+  | 'Modern'
+  | 'Cinematic'
+  | 'Podcast'
+  | 'Minimal'
+  | 'Clean';
+
+export interface VoiceSyncCaptionFormatInfo {
+  id: CaptionPresetType;
+  label: string;
+  desc: string;
+  badge: string;
+  baseColor: string;
+  activeWordColor: string;
+  activeWordBgColor?: string;
+  activeWordGlowColor?: string;
+  isMultiline?: boolean;
+  isSingleWordPop?: boolean;
+}
+
+export const VOICE_SYNC_CAPTION_FORMATS: VoiceSyncCaptionFormatInfo[] = [
+  {
+    id: 'YellowVoiceSync',
+    label: '⚡ Yellow Voice Sync',
+    desc: 'Spoken word turns Yellow (#FACC15), other words stay White',
+    badge: 'WORD-BY-WORD',
+    baseColor: '#FFFFFF',
+    activeWordColor: '#FACC15',
+    activeWordGlowColor: '#FACC15',
+  },
+  {
+    id: 'GreenVoiceSync',
+    label: '⚡ Green Voice Sync',
+    desc: 'Spoken word turns Neon Green (#22C55E), other words stay White',
+    badge: 'WORD-BY-WORD',
+    baseColor: '#FFFFFF',
+    activeWordColor: '#22C55E',
+    activeWordGlowColor: '#22C55E',
+  },
+  {
+    id: 'YellowGreenMultiline',
+    label: '☰ Yellow & Green Multiline',
+    desc: 'Stacked multiline: active voice word syncs Green/Yellow',
+    badge: 'MULTILINE SYNC',
+    baseColor: '#FFFFFF',
+    activeWordColor: '#22C55E',
+    activeWordBgColor: '#FACC15',
+    isMultiline: true,
+  },
+  {
+    id: 'MultilineYellowSync',
+    label: '☰ Multiline Yellow Sync',
+    desc: 'Multi-line stack where spoken word turns Yellow (#FACC15)',
+    badge: 'MULTILINE SYNC',
+    baseColor: '#FFFFFF',
+    activeWordColor: '#FACC15',
+    activeWordGlowColor: '#FACC15',
+    isMultiline: true,
+  },
+  {
+    id: 'MultilineGreenSync',
+    label: '☰ Multiline Green Sync',
+    desc: 'Multi-line stack where spoken word turns Green (#22C55E)',
+    badge: 'MULTILINE SYNC',
+    baseColor: '#FFFFFF',
+    activeWordColor: '#22C55E',
+    activeWordGlowColor: '#22C55E',
+    isMultiline: true,
+  },
+  {
+    id: 'YellowBoxSync',
+    label: '🟨 Yellow Box Word Sync',
+    desc: 'Spoken word gets a Yellow pill box, rest stay White',
+    badge: 'PILL SYNC',
+    baseColor: '#FFFFFF',
+    activeWordColor: '#090D16',
+    activeWordBgColor: '#FACC15',
+  },
+  {
+    id: 'GreenBoxSync',
+    label: '🟩 Green Box Word Sync',
+    desc: 'Spoken word gets a Green pill box, rest stay White',
+    badge: 'PILL SYNC',
+    baseColor: '#FFFFFF',
+    activeWordColor: '#090D16',
+    activeWordBgColor: '#22C55E',
+  },
+  {
+    id: 'SingleWordYellowGreen',
+    label: '🎯 1-Word Pop (Yellow/Green)',
+    desc: 'Pops active voice word in alternating Yellow & Green',
+    badge: '1-WORD POP',
+    baseColor: '#FFFFFF',
+    activeWordColor: '#FACC15',
+    isSingleWordPop: true,
+  },
+  {
+    id: 'WordGlowing',
+    label: '✦ Word Glowing',
+    desc: 'Active spoken word neon glow, rest stay same',
+    badge: 'NEON GLOW',
+    baseColor: '#FFFFFF',
+    activeWordColor: '#38BDF8',
+    activeWordGlowColor: '#E879F9',
+  },
+  {
+    id: 'Multiline',
+    label: '☰ Multiline Stack',
+    desc: 'Stacked multi-line box with voice word highlight',
+    badge: 'MULTILINE',
+    baseColor: '#FFFFFF',
+    activeWordColor: '#FACC15',
+    isMultiline: true,
+  },
+  {
+    id: 'Karaoke',
+    label: '♪ Karaoke Sync',
+    desc: 'Synced lyric word highlight',
+    badge: 'LYRICS',
+    baseColor: '#FFFFFF',
+    activeWordColor: '#FACC15',
+  },
+  {
+    id: 'Highlight',
+    label: '★ Highlight Box',
+    desc: 'Active word highlight pill',
+    badge: 'HIGHLIGHT',
+    baseColor: '#FFFFFF',
+    activeWordColor: '#22C55E',
+    activeWordBgColor: '#0F172A',
+  },
+  {
+    id: 'Bold',
+    label: 'Bold Impact',
+    desc: 'Heavy creator headline',
+    badge: 'CREATOR',
+    baseColor: '#FFFFFF',
+    activeWordColor: '#FACC15',
+  },
+  {
+    id: 'Modern',
+    label: 'Modern Clean',
+    desc: 'Sleek social subtitle',
+    badge: 'STUDIO',
+    baseColor: '#FFFFFF',
+    activeWordColor: '#22C55E',
+  },
+  {
+    id: 'Cinematic',
+    label: 'Cinematic',
+    desc: 'Wide letterspaced film subtitle',
+    badge: 'FILM',
+    baseColor: '#FFFFFF',
+    activeWordColor: '#FACC15',
+  },
+  {
+    id: 'Podcast',
+    label: 'Podcast Bar',
+    desc: 'High-contrast speaker caption bar',
+    badge: 'PODCAST',
+    baseColor: '#FFFFFF',
+    activeWordColor: '#22C55E',
+  },
+  {
+    id: 'Minimal',
+    label: 'Minimal',
+    desc: 'Crisp transparent text',
+    badge: 'CLEAN',
+    baseColor: '#FFFFFF',
+    activeWordColor: '#FACC15',
+  },
+  {
+    id: 'Clean',
+    label: 'Broadcast Clean',
+    desc: 'Standard TV caption',
+    badge: 'TV',
+    baseColor: '#FFFFFF',
+    activeWordColor: '#FACC15',
+  },
+];
+
 export interface TextStyleConfig {
   fontFamily: string;
   fontSize: number;
@@ -56,21 +262,19 @@ export interface TextStyleConfig {
   shadowColor: string;
   shadowBlur: number;
   shadowOpacity: number;
+  shadowOffsetX?: number;
+  shadowOffsetY?: number;
   backgroundColor: string;
   backgroundOpacity: number;
   padding: number;
   cornerRadius: number;
-  captionPreset?:
-    | 'Minimal'
-    | 'Bold'
-    | 'Modern'
-    | 'Podcast'
-    | 'Karaoke'
-    | 'Highlight'
-    | 'Clean'
-    | 'Cinematic'
-    | 'WordGlowing'
-    | 'Multiline';
+  captionPreset?: CaptionPresetType;
+  activeWordColor?: string;
+  activeWordBgColor?: string;
+  activeWordGlowColor?: string;
+  activeWordScale?: number;
+  inactiveWordSameColor?: boolean;
+  wordStyles?: Record<number, WordStyleOverride>;
 }
 
 export type MaskShapeType =
@@ -90,6 +294,7 @@ export interface ClipMaskConfig {
   shape: MaskShapeType;
   customPolygon?: string; // e.g. "50% 0%, 100% 38%, 82% 100%, 18% 100%, 0% 38%"
   scale: number;          // 20 to 150%
+  feather?: number;
   invert?: boolean;
 }
 
