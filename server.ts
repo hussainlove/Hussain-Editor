@@ -43,6 +43,108 @@ const upload = multer({
 
 // In-memory registry persisted to projects/media_registry.json
 const REGISTRY_FILE = path.join(DIRS.projects, 'media_registry.json');
+const AUTO_IMPORT_DIR = path.resolve(process.cwd(), 'auto_import');
+const AUTO_IMPORTED_DIR = path.join(AUTO_IMPORT_DIR, 'imported');
+
+// Queue of media items imported via auto_import.bat or watch-folder that should be placed onto the live UI timeline
+const pendingAutoTimelineQueue: MediaMetadata[] = [];
+
+export interface AutoSyncTimingItem {
+  media: MediaMetadata;
+  startTime: number;
+  duration: number;
+}
+
+export interface AutoSyncBatch {
+  id: string;
+  folderName: string;
+  clearTimeline: boolean;
+  totalVoiceoverDuration: number;
+  perImageDuration: number;
+  imageCount: number;
+  voiceoverCount: number;
+  visualTimings: AutoSyncTimingItem[];
+  voiceoverTimings: AutoSyncTimingItem[];
+  createdAt: string;
+}
+
+const pendingAutoSyncBatches: AutoSyncBatch[] = [];
+const pendingSyncBatchStaging: Record<string, MediaMetadata[]> = {};
+
+function buildAutoSyncBatch(
+  items: MediaMetadata[],
+  folderName: string,
+  clearTimeline = true
+): AutoSyncBatch {
+  const naturalSort = (a: MediaMetadata, b: MediaMetadata) =>
+    a.originalName.localeCompare(b.originalName, undefined, { numeric: true, sensitivity: 'base' });
+
+  const voiceovers = items.filter((m) => m.type === 'audio').sort(naturalSort);
+  const visuals = items.filter((m) => m.type === 'image' || m.type === 'video').sort(naturalSort);
+
+  const rawVoSum = voiceovers.reduce((sum, vo) => sum + Math.max(0.5, Number(vo.duration) || 0), 0);
+  const totalVoiceoverDuration =
+    rawVoSum > 0
+      ? Math.round(rawVoSum * 100) / 100
+      : Math.max(4, Math.round(visuals.length * 4 * 100) / 100);
+
+  const voiceoverTimings: AutoSyncTimingItem[] = [];
+  let voCursor = 0;
+  for (const vo of voiceovers) {
+    const dur = Math.max(0.5, Math.round((Number(vo.duration) || 5) * 100) / 100);
+    voiceoverTimings.push({
+      media: vo,
+      startTime: Math.round(voCursor * 100) / 100,
+      duration: dur,
+    });
+    voCursor += dur;
+  }
+
+  const visualTimings: AutoSyncTimingItem[] = [];
+  const count = visuals.length;
+  const perImageDuration =
+    count > 0 ? Math.max(0.25, Math.round((totalVoiceoverDuration / count) * 100) / 100) : 0;
+
+  if (count > 0) {
+    const exactStep = totalVoiceoverDuration / count;
+    for (let i = 0; i < count; i++) {
+      const startTime = Math.round(i * exactStep * 100) / 100;
+      const endTime =
+        i === count - 1
+          ? totalVoiceoverDuration
+          : Math.round((i + 1) * exactStep * 100) / 100;
+      const duration = Math.max(0.2, Math.round((endTime - startTime) * 100) / 100);
+      visualTimings.push({
+        media: visuals[i],
+        startTime,
+        duration,
+      });
+    }
+  }
+
+  return {
+    id: `autosync_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+    folderName,
+    clearTimeline,
+    totalVoiceoverDuration,
+    perImageDuration,
+    imageCount: visuals.length,
+    voiceoverCount: voiceovers.length,
+    visualTimings,
+    voiceoverTimings,
+    createdAt: new Date().toISOString(),
+  };
+}
+
+function ensureAutoImportDirs() {
+  try {
+    if (!fs.existsSync(AUTO_IMPORT_DIR)) fs.mkdirSync(AUTO_IMPORT_DIR, { recursive: true });
+    if (!fs.existsSync(AUTO_IMPORTED_DIR)) fs.mkdirSync(AUTO_IMPORTED_DIR, { recursive: true });
+  } catch {
+    // ignore
+  }
+}
+ensureAutoImportDirs();
 
 function loadMediaRegistry(): MediaMetadata[] {
   try {
@@ -134,16 +236,40 @@ export async function createAppServer() {
       const registry = loadMediaRegistry();
       const imported: MediaMetadata[] = [];
 
+      const autoTimeline = req.query.autoTimeline === 'true' || req.body?.autoTimeline === 'true';
+      const autoSyncVoiceover =
+        req.query.autoSyncVoiceover === 'true' || req.body?.autoSyncVoiceover === 'true';
+      const syncBatchId = String(req.query.syncBatchId || req.body?.syncBatchId || '').trim();
+
       for (const file of files) {
         const id = `media_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
         const meta = await probeMediaFile(file.path, id, file.originalname);
         registry.unshift(meta);
         imported.push(meta);
+        if (syncBatchId) {
+          if (!pendingSyncBatchStaging[syncBatchId]) {
+            pendingSyncBatchStaging[syncBatchId] = [];
+          }
+          pendingSyncBatchStaging[syncBatchId].push(meta);
+        } else if (autoTimeline && !autoSyncVoiceover) {
+          pendingAutoTimelineQueue.push(meta);
+        }
         logApp('INFO', 'MediaImport', `Imported ${file.originalname} (${meta.format}, ${meta.duration}s)`);
       }
 
+      let autoSyncBatch: AutoSyncBatch | undefined;
+      if (autoSyncVoiceover && !syncBatchId && imported.length > 0) {
+        autoSyncBatch = buildAutoSyncBatch(imported, 'Uploaded Folder', true);
+        pendingAutoSyncBatches.push(autoSyncBatch);
+      }
+
       saveMediaRegistry(registry);
-      res.json({ imported, media: registry });
+      res.json({
+        imported,
+        media: registry,
+        queuedForTimeline: autoTimeline ? imported.length : 0,
+        autoSyncBatch,
+      });
     } catch (err: any) {
       logApp('ERROR', 'MediaImport', 'Media import failed', err?.message);
       res.status(500).json({
@@ -181,13 +307,17 @@ export async function createAppServer() {
   });
 
   // Generate real starter test media via FFmpeg lavfi if user wants sample clips to test immediately
-  app.post('/api/media/generate-samples', async (_req, res) => {
+  app.post('/api/media/generate-samples', async (req, res) => {
     try {
+      const autoTimeline = req.query.autoTimeline === 'true' || req.body?.autoTimeline === 'true';
       const samples = await generateStarterSampleMedia();
       const registry = loadMediaRegistry();
       for (const sample of samples) {
         if (!registry.some((r) => r.id === sample.id)) {
           registry.push(sample);
+        }
+        if (autoTimeline) {
+          pendingAutoTimelineQueue.push(sample);
         }
       }
       saveMediaRegistry(registry);
@@ -980,7 +1110,7 @@ export async function createAppServer() {
     res.json({ success: true, assetId, downloadedIds: current });
   });
 
-  // Download Windows Installer Package Bundle (.zip containing Inno Setup .iss, PyInstaller launcher, build scripts, and docs)
+  // Download Complete Self-Contained Windows Installer & App Package Bundle (.zip)
   app.get('/api/installer/bundle', (_req, res) => {
     res.setHeader('Content-Type', 'application/zip');
     res.setHeader('Content-Disposition', 'attachment; filename="HussainVideoEditor-Windows-Installer-SDK.zip"');
@@ -988,21 +1118,270 @@ export async function createAppServer() {
     const archive = archiver('zip', { zlib: { level: 9 } });
     archive.pipe(res);
 
-    const filesToInclude = [
-      { diskPath: path.resolve(process.cwd(), 'installer', 'HussainVideoEditor.iss'), zipPath: 'installer/HussainVideoEditor.iss' },
-      { diskPath: path.resolve(process.cwd(), 'installer', 'desktop_launcher.py'), zipPath: 'installer/desktop_launcher.py' },
-      { diskPath: path.resolve(process.cwd(), 'installer', 'build_windows_installer.bat'), zipPath: 'installer/build_windows_installer.bat' },
-      { diskPath: path.resolve(process.cwd(), 'docs', 'ARCHITECTURE_AND_QA.md'), zipPath: 'docs/ARCHITECTURE_AND_QA.md' },
-      { diskPath: path.resolve(process.cwd(), 'package.json'), zipPath: 'package.json' },
+    const rootFiles = [
+      'package.json',
+      'server.ts',
+      'index.html',
+      'vite.config.ts',
+      'tsconfig.json',
+      'metadata.json',
+      '.env.example',
+      'auto_import.bat',
+      'build_windows_installer.bat',
     ];
 
-    for (const item of filesToInclude) {
-      if (fs.existsSync(item.diskPath)) {
-        archive.file(item.diskPath, { name: item.zipPath });
+    for (const fileName of rootFiles) {
+      const fullPath = path.resolve(process.cwd(), fileName);
+      if (fs.existsSync(fullPath)) {
+        archive.file(fullPath, { name: fileName });
       }
     }
 
+    const dirsToInclude = ['src', 'installer', 'docs'];
+    for (const dirName of dirsToInclude) {
+      const fullDir = path.resolve(process.cwd(), dirName);
+      if (fs.existsSync(fullDir)) {
+        archive.directory(fullDir, dirName);
+      }
+    }
+
+    const distDir = path.resolve(process.cwd(), 'dist');
+    if (fs.existsSync(distDir)) {
+      archive.directory(distDir, 'dist');
+    }
+
     archive.finalize();
+  });
+
+  // Download standalone build_windows_installer.bat directly with 1 click
+  app.get('/api/installer/download-builder-bat', (_req, res) => {
+    const batPath = path.resolve(process.cwd(), 'installer', 'build_windows_installer.bat');
+    if (!fs.existsSync(batPath)) {
+      res.status(404).send('build_windows_installer.bat not found');
+      return;
+    }
+    res.setHeader('Content-Type', 'application/x-bat');
+    res.setHeader('Content-Disposition', 'attachment; filename="build_windows_installer.bat"');
+    res.sendFile(batPath);
+  });
+
+  // Download standalone auto_import.bat directly with 1 click
+  app.get('/api/automation/download-bat', (_req, res) => {
+    const batPath = path.resolve(process.cwd(), 'auto_import.bat');
+    if (!fs.existsSync(batPath)) {
+      res.status(404).send('auto_import.bat not found');
+      return;
+    }
+    res.setHeader('Content-Type', 'application/x-bat');
+    res.setHeader('Content-Disposition', 'attachment; filename="auto_import.bat"');
+    res.sendFile(batPath);
+  });
+
+  // Poll endpoint for live UI sync when auto_import.bat imports media from CLI / Watch Folder
+  app.get('/api/automation/poll', (_req, res) => {
+    ensureAutoImportDirs();
+    const drained = pendingAutoTimelineQueue.splice(0, pendingAutoTimelineQueue.length);
+    const drainedSyncBatches = pendingAutoSyncBatches.splice(0, pendingAutoSyncBatches.length);
+    let watchFolderPendingCount = 0;
+    try {
+      const supportedExts = new Set([
+        '.mp4', '.mov', '.mkv', '.avi', '.webm',
+        '.mp3', '.wav', '.aac', '.m4a', '.flac', '.ogg',
+        '.png', '.jpg', '.jpeg', '.webp', '.gif', '.bmp',
+      ]);
+      const entries = fs.readdirSync(AUTO_IMPORT_DIR, { withFileTypes: true });
+      watchFolderPendingCount = entries.filter(
+        (e) => e.isFile() && supportedExts.has(path.extname(e.name).toLowerCase())
+      ).length;
+    } catch {
+      // ignore
+    }
+    res.json({
+      pendingTimelineItems: drained,
+      autoSyncBatches: drainedSyncBatches,
+      watchFolderPath: AUTO_IMPORT_DIR,
+      watchFolderPendingCount,
+      media: drained.length > 0 || drainedSyncBatches.length > 0 ? loadMediaRegistry() : undefined,
+    });
+  });
+
+  // Finalize a multipart upload batch from auto_import.bat into a synchronized Images + Voiceover Timeline Batch
+  app.post('/api/automation/auto-sync-finalize', (req, res) => {
+    const syncBatchId = String(req.body?.syncBatchId || '').trim();
+    const clearTimeline = req.body?.clearTimeline !== false;
+    const staged = syncBatchId ? pendingSyncBatchStaging[syncBatchId] || [] : [];
+    if (syncBatchId) {
+      delete pendingSyncBatchStaging[syncBatchId];
+    }
+    if (staged.length === 0) {
+      res.status(400).json({ error: 'No staged media items found for syncBatchId' });
+      return;
+    }
+    const batch = buildAutoSyncBatch(staged, syncBatchId, clearTimeline);
+    pendingAutoSyncBatches.push(batch);
+    logApp(
+      'INFO',
+      'AutoSyncFinalize',
+      `Auto-synced ${batch.imageCount} image(s) (${batch.perImageDuration}s each) across ${batch.totalVoiceoverDuration}s voiceover`
+    );
+    res.json({
+      success: true,
+      autoSyncBatch: batch,
+      imageCount: batch.imageCount,
+      voiceoverCount: batch.voiceoverCount,
+      totalVoiceoverDuration: batch.totalVoiceoverDuration,
+      perImageDuration: batch.perImageDuration,
+    });
+  });
+
+  // Auto-Sync Folder: Scans a local folder containing Images + Voiceover and syncs them on the Timeline
+  app.post('/api/automation/auto-sync-folder', async (req, res) => {
+    try {
+      ensureDirectories();
+      ensureAutoImportDirs();
+      const rawFolder = req.body?.folderPath ? String(req.body.folderPath).trim().replace(/^"+|"+$/g, '') : '';
+      const targetDir = rawFolder ? path.resolve(rawFolder) : AUTO_IMPORT_DIR;
+      const clearTimeline = req.body?.clearTimeline !== false;
+
+      if (!fs.existsSync(targetDir)) {
+        res.status(404).json({ error: `Folder not found: ${targetDir}` });
+        return;
+      }
+
+      const supportedExts = new Set([
+        '.mp4', '.mov', '.mkv', '.avi', '.webm',
+        '.mp3', '.wav', '.aac', '.m4a', '.flac', '.ogg',
+        '.png', '.jpg', '.jpeg', '.webp', '.gif', '.bmp',
+      ]);
+
+      const entries = fs.readdirSync(targetDir, { withFileTypes: true });
+      const mediaFiles = entries
+        .filter((e) => e.isFile() && supportedExts.has(path.extname(e.name).toLowerCase()))
+        .sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: 'base' }));
+
+      if (mediaFiles.length === 0) {
+        res.status(400).json({ error: `No supported Images or Voiceover files found in ${targetDir}` });
+        return;
+      }
+
+      const registry = loadMediaRegistry();
+      const imported: MediaMetadata[] = [];
+
+      for (const entry of mediaFiles) {
+        const srcFull = path.join(targetDir, entry.name);
+        const safeOriginal = entry.name.replace(/[^a-zA-Z0-9._-]/g, '_');
+        const destFull = path.join(DIRS.uploads, `${Date.now()}_${safeOriginal}`);
+        fs.copyFileSync(srcFull, destFull);
+
+        const id = `media_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+        const meta = await probeMediaFile(destFull, id, entry.name);
+        registry.unshift(meta);
+        imported.push(meta);
+      }
+
+      saveMediaRegistry(registry);
+
+      const batch = buildAutoSyncBatch(imported, path.basename(targetDir) || targetDir, clearTimeline);
+      pendingAutoSyncBatches.push(batch);
+
+      logApp(
+        'INFO',
+        'AutoSyncFolder',
+        `Synced ${batch.imageCount} image(s) (${batch.perImageDuration}s each) with ${batch.voiceoverCount} voiceover (${batch.totalVoiceoverDuration}s) from ${targetDir}`
+      );
+
+      res.json({
+        success: true,
+        scannedFolder: targetDir,
+        importedCount: imported.length,
+        imageCount: batch.imageCount,
+        voiceoverCount: batch.voiceoverCount,
+        totalVoiceoverDuration: batch.totalVoiceoverDuration,
+        perImageDuration: batch.perImageDuration,
+        autoSyncBatch: batch,
+        media: registry,
+      });
+    } catch (err: any) {
+      logApp('ERROR', 'AutoSyncFolder', 'Failed auto-syncing folder', err?.message);
+      res.status(500).json({ error: err?.message || 'Failed auto-syncing folder' });
+    }
+  });
+
+  // Server-side folder scan for auto_import directory (or custom local directory)
+  app.post('/api/automation/scan-folder', async (req, res) => {
+    try {
+      ensureDirectories();
+      ensureAutoImportDirs();
+      const customFolder = req.body?.folderPath ? String(req.body.folderPath).trim().replace(/^"+|"+$/g, '') : '';
+      const targetDir = customFolder ? path.resolve(customFolder) : AUTO_IMPORT_DIR;
+      const autoTimeline = req.body?.autoTimeline !== false;
+      const autoSyncVoiceover = req.body?.autoSyncVoiceover !== false;
+
+      if (!fs.existsSync(targetDir)) {
+        res.status(404).json({ error: `Folder not found: ${targetDir}` });
+        return;
+      }
+
+      const supportedExts = new Set([
+        '.mp4', '.mov', '.mkv', '.avi', '.webm',
+        '.mp3', '.wav', '.aac', '.m4a', '.flac', '.ogg',
+        '.png', '.jpg', '.jpeg', '.webp', '.gif', '.bmp',
+      ]);
+
+      const entries = fs.readdirSync(targetDir, { withFileTypes: true });
+      const mediaFiles = entries
+        .filter((e) => e.isFile() && supportedExts.has(path.extname(e.name).toLowerCase()))
+        .sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: 'base' }));
+
+      const registry = loadMediaRegistry();
+      const imported: MediaMetadata[] = [];
+
+      for (const entry of mediaFiles) {
+        const srcFull = path.join(targetDir, entry.name);
+        const safeOriginal = entry.name.replace(/[^a-zA-Z0-9._-]/g, '_');
+        const destFull = path.join(DIRS.uploads, `${Date.now()}_${safeOriginal}`);
+        fs.copyFileSync(srcFull, destFull);
+
+        const id = `media_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+        const meta = await probeMediaFile(destFull, id, entry.name);
+        registry.unshift(meta);
+        imported.push(meta);
+
+        // If scanned from the default watch folder, move original into auto_import/imported/
+        if (targetDir === AUTO_IMPORT_DIR) {
+          try {
+            fs.renameSync(srcFull, path.join(AUTO_IMPORTED_DIR, entry.name));
+          } catch {
+            // ignore
+          }
+        }
+        logApp('INFO', 'AutoImportFolder', `Auto-imported ${entry.name} from ${targetDir}`);
+      }
+
+      let autoSyncBatch: AutoSyncBatch | undefined;
+      if (imported.length > 0 && autoTimeline) {
+        if (autoSyncVoiceover) {
+          autoSyncBatch = buildAutoSyncBatch(imported, path.basename(targetDir) || 'auto_import', true);
+          pendingAutoSyncBatches.push(autoSyncBatch);
+        } else {
+          for (const meta of imported) {
+            pendingAutoTimelineQueue.push(meta);
+          }
+        }
+      }
+
+      saveMediaRegistry(registry);
+      res.json({
+        scannedFolder: targetDir,
+        importedCount: imported.length,
+        imported,
+        autoSyncBatch,
+        media: registry,
+      });
+    } catch (err: any) {
+      logApp('ERROR', 'AutoImportFolder', 'Failed scanning auto_import folder', err?.message);
+      res.status(500).json({ error: err?.message || 'Failed scanning folder' });
+    }
   });
 
   return app;

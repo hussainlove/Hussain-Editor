@@ -1,58 +1,64 @@
 #!/usr/bin/env python3
 """
-Hussain Video Editor - Native Windows Desktop Launcher (PyWebView + Bundled FFmpeg)
-Bundles into a standalone Windows executable using PyInstaller without requiring Python, Node.js, or FFmpeg in PATH.
+Hussain Video Editor - Native Windows Desktop Launcher (PyWebView / Edge App Mode + Bundled FFmpeg)
+Automatically starts the local Hussain Video Editor server on port 3000 if not already running,
+then opens the native desktop window.
 """
 import os
 import sys
 import time
-import socket
+import urllib.request
 import subprocess
-import threading
 from pathlib import Path
 
 APP_NAME = "Hussain Video Editor"
 APP_VERSION = "1.0.0"
+APP_URL = "http://localhost:3000"
 
-def get_base_dir() -> Path:
-    if getattr(sys, "frozen", False):
-        return Path(sys._MEIPASS)  # type: ignore
-    return Path(__file__).resolve().parent.parent
+def get_project_root() -> Path:
+    curr = Path(__file__).resolve().parent
+    for _ in range(4):
+        if (curr / "package.json").exists() and (curr / "server.ts").exists():
+            return curr
+        if curr.parent == curr:
+            break
+        curr = curr.parent
+    return Path.cwd()
 
-def get_user_data_dir() -> Path:
-    appdata = os.environ.get("APPDATA") or os.path.expanduser("~")
-    data_dir = Path(appdata) / APP_NAME
-    for sub in ["projects", "projects/autosave", "cache/thumbnails", "cache/waveforms", "cache/proxies", "cache/exports", "logs"]:
-        (data_dir / sub).mkdir(parents=True, exist_ok=True)
-    return data_dir
+def is_server_online() -> bool:
+    try:
+        with urllib.request.urlopen(f"{APP_URL}/api/system/info", timeout=1.5) as resp:
+            return resp.status == 200
+    except Exception:
+        return False
 
-def configure_bundled_ffmpeg(base_dir: Path):
-    ffmpeg_bin = base_dir / "ffmpeg" / "bin"
+def start_backend_server(root_dir: Path):
+    ffmpeg_bin = root_dir / "ffmpeg" / "bin"
     if ffmpeg_bin.exists():
         os.environ["PATH"] = str(ffmpeg_bin) + os.pathsep + os.environ.get("PATH", "")
 
-def find_free_port(default_port: int = 3000) -> int:
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        if s.connect_ex(("127.0.0.1", default_port)) != 0:
-            return default_port
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        s.bind(("127.0.0.1", 0))
-        return s.getsockname()[1]
+    if not is_server_online():
+        creationflags = 0x08000000 if sys.platform == "win32" else 0  # CREATE_NO_WINDOW on Windows
+        subprocess.Popen(
+            "npm run dev",
+            cwd=str(root_dir),
+            shell=True,
+            creationflags=creationflags,
+        )
+        for _ in range(30):
+            time.sleep(1)
+            if is_server_online():
+                break
 
 def main():
-    base_dir = get_base_dir()
-    user_data_dir = get_user_data_dir()
-    configure_bundled_ffmpeg(base_dir)
-    os.environ["HVE_USER_DATA_DIR"] = str(user_data_dir)
-
-    port = find_free_port(3000)
-    url = f"http://127.0.0.1:{port}"
+    root_dir = get_project_root()
+    start_backend_server(root_dir)
 
     try:
         import webview  # pywebview for native Windows 10/11 EdgeWebView2 window
-        window = webview.create_window(
+        webview.create_window(
             title=f"{APP_NAME} v{APP_VERSION}",
-            url=url,
+            url=APP_URL,
             width=1440,
             height=900,
             min_size=(1280, 720),
@@ -62,8 +68,7 @@ def main():
         webview.start()
     except ImportError:
         import webbrowser
-        print(f"Launching {APP_NAME} at {url}")
-        webbrowser.open(url)
+        webbrowser.open(APP_URL)
 
 if __name__ == "__main__":
     main()

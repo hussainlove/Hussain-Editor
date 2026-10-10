@@ -199,6 +199,9 @@ export default function App() {
   // Modals
   const [showExportModal, setShowExportModal] = useState(false);
   const [showSettingsModal, setShowSettingsModal] = useState(false);
+  const [settingsInitialTab, setSettingsInitialTab] = useState<
+    'General' | 'Installer (.EXE)' | 'Performance' | 'Cache' | 'Shortcuts' | 'Logs'
+  >('Installer (.EXE)');
   const [showWelcomeModal, setShowWelcomeModal] = useState(false);
   const [globalSearch, setGlobalSearch] = useState('');
   const [autoSaveIntervalSec, setAutoSaveIntervalSec] = useState(
@@ -206,6 +209,7 @@ export default function App() {
   );
 
   const projectFileInputRef = useRef<HTMLInputElement>(null);
+  const autoSyncFolderInputRef = useRef<HTMLInputElement>(null);
 
   // Commit state change with limitless undo history (up to 500 steps)
   const commitProjectChange = useCallback(
@@ -425,6 +429,324 @@ export default function App() {
     }, autoSaveIntervalSec * 1000);
     return () => window.clearInterval(timer);
   }, [project, autoSaveIntervalSec]);
+
+  // Helper to sync a set of Images + Voiceover onto Timeline (V1: Images synced to A1: Voiceover length)
+  const syncMediaItemsWithVoiceoverOnTimeline = useCallback(
+    (items: ImportedMediaItem[], clearTimeline = true) => {
+      const naturalSort = (a: ImportedMediaItem, b: ImportedMediaItem) =>
+        a.originalName.localeCompare(b.originalName, undefined, {
+          numeric: true,
+          sensitivity: 'base',
+        });
+
+      const voiceovers = items.filter((m) => m.type === 'audio').sort(naturalSort);
+      const visuals = items
+        .filter((m) => m.type === 'image' || m.type === 'video')
+        .sort(naturalSort);
+
+      const rawVoSum = voiceovers.reduce(
+        (sum, vo) => sum + Math.max(0.5, Number(vo.duration) || 0),
+        0
+      );
+      const totalVoDuration =
+        rawVoSum > 0
+          ? Math.round(rawVoSum * 100) / 100
+          : Math.max(4, Math.round(visuals.length * 4 * 100) / 100);
+
+      const perImageDur =
+        visuals.length > 0
+          ? Math.max(0.25, Math.round((totalVoDuration / visuals.length) * 100) / 100)
+          : 0;
+
+      setProject((prev) => {
+        const videoTrack =
+          prev.tracks.find((t) => t.type === 'video' && !t.locked) || prev.tracks[0];
+        const audioTrack =
+          prev.tracks.find((t) => t.type === 'audio' && !t.locked) ||
+          prev.tracks[prev.tracks.length - 1];
+
+        const baseClips = clearTimeline ? [] : [...prev.clips];
+        const startOffset = clearTimeline
+          ? 0
+          : baseClips.reduce(
+              (max, c) => Math.max(max, Math.round((c.startTime + c.duration) * 100) / 100),
+              0
+            );
+
+        const syncedClips: TimelineClip[] = [];
+
+        // 1. Place Voiceover clip(s) on Audio Track 1
+        let voCursor = startOffset;
+        voiceovers.forEach((vo) => {
+          const dur = Math.max(0.5, Math.round((Number(vo.duration) || 5) * 100) / 100);
+          syncedClips.push({
+            id: `clip_vo_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+            trackId: audioTrack.id,
+            mediaId: vo.id,
+            name: vo.originalName,
+            type: 'audio',
+            url: vo.url,
+            filePath: vo.filePath,
+            thumbnailUrl: vo.thumbnailUrl,
+            startTime: Math.round(voCursor * 100) / 100,
+            duration: dur,
+            trimStart: 0,
+            sourceDuration: dur,
+            positionX: 0,
+            positionY: 0,
+            scaleX: 100,
+            scaleY: 100,
+            rotation: 0,
+            flipH: false,
+            flipV: false,
+            anchorX: 50,
+            anchorY: 50,
+            opacity: 100,
+            blendMode: 'normal',
+            cropTop: 0,
+            cropBottom: 0,
+            cropLeft: 0,
+            cropRight: 0,
+            speed: 1,
+            reversed: false,
+            volume: 100,
+            muted: false,
+            fadeIn: 0.15,
+            fadeOut: 0.25,
+            pitch: 0,
+            noiseReduction: false,
+            peaks: vo.peaks,
+            effects: [],
+            filterPreset: 'None',
+            transitionIn: { type: 'None', duration: 0.5 },
+            transitionOut: { type: 'None', duration: 0.5 },
+            animationIn: 'None',
+            animationOut: 'None',
+            adjustments: { ...DEFAULT_ADJUSTMENTS },
+            keyframes: [],
+          });
+          voCursor += dur;
+        });
+
+        // 2. Place all Images sequentially on Video Track 1 synced across exact Voiceover duration
+        const count = visuals.length;
+        if (count > 0) {
+          const exactStep = totalVoDuration / count;
+          visuals.forEach((vis, idx) => {
+            const relStart = Math.round(idx * exactStep * 100) / 100;
+            const relEnd =
+              idx === count - 1
+                ? totalVoDuration
+                : Math.round((idx + 1) * exactStep * 100) / 100;
+            const clipDur = Math.max(0.2, Math.round((relEnd - relStart) * 100) / 100);
+            const transDur = clipDur >= 1.2 ? 0.35 : 0.15;
+
+            syncedClips.push({
+              id: `clip_img_${Date.now()}_${idx}_${Math.random().toString(36).slice(2, 5)}`,
+              trackId: videoTrack.id,
+              mediaId: vis.id,
+              name: vis.originalName,
+              type: vis.type,
+              url: vis.url,
+              filePath: vis.filePath,
+              thumbnailUrl: vis.thumbnailUrl || vis.url,
+              startTime: Math.round((startOffset + relStart) * 100) / 100,
+              duration: clipDur,
+              trimStart: 0,
+              sourceDuration: Math.max(clipDur, Number(vis.duration) || clipDur),
+              positionX: 0,
+              positionY: 0,
+              scaleX: 100,
+              scaleY: 100,
+              rotation: 0,
+              flipH: false,
+              flipV: false,
+              anchorX: 50,
+              anchorY: 50,
+              opacity: 100,
+              blendMode: 'normal',
+              cropTop: 0,
+              cropBottom: 0,
+              cropLeft: 0,
+              cropRight: 0,
+              speed: 1,
+              reversed: false,
+              volume: vis.type === 'video' ? 0 : 100,
+              muted: vis.type === 'video' && voiceovers.length > 0,
+              fadeIn: 0,
+              fadeOut: 0,
+              pitch: 0,
+              noiseReduction: false,
+              peaks: vis.peaks,
+              effects: [],
+              filterPreset: 'None',
+              transitionIn: idx === 0 ? { type: 'Fade', duration: transDur } : { type: 'Crossfade', duration: transDur },
+              transitionOut: { type: 'None', duration: transDur },
+              animationIn: 'None',
+              animationOut: 'None',
+              adjustments: { ...DEFAULT_ADJUSTMENTS },
+              keyframes: [],
+            });
+          });
+        }
+
+        if (syncedClips.length > 0) {
+          setSelectedClipIds([syncedClips[0].id]);
+        }
+
+        return {
+          ...prev,
+          clips: [...baseClips, ...syncedClips],
+        };
+      });
+
+      setPlayheadTime(0);
+      // Adjust timeline zoom so the entire synced sequence fits nicely on screen
+      const idealZoom = Math.max(8, Math.min(80, Math.round(900 / Math.max(5, totalVoDuration))));
+      setZoomPxPerSec(idealZoom);
+
+      setStatusBanner({
+        type: 'success',
+        message: `Auto-Sync Complete: Synced ${visuals.length} image(s) (${perImageDur}s each) with Voiceover (${totalVoDuration}s total) on Timeline!`,
+      });
+    },
+    []
+  );
+
+  // Live poll for media auto-imported via auto_import.bat or watch folder scan
+  useEffect(() => {
+    const pollTimer = window.setInterval(async () => {
+      try {
+        const res = await fetch('/api/automation/poll');
+        if (!res.ok) return;
+        const data = await res.json();
+
+        const syncBatches: any[] = Array.isArray(data.autoSyncBatches) ? data.autoSyncBatches : [];
+        const incoming: ImportedMediaItem[] = Array.isArray(data.pendingTimelineItems)
+          ? data.pendingTimelineItems
+          : [];
+
+        if (syncBatches.length === 0 && incoming.length === 0) return;
+
+        if (Array.isArray(data.media)) {
+          setMediaItems(data.media);
+        }
+
+        // Handle synchronized Images + Voiceover batches from auto_import.bat
+        if (syncBatches.length > 0) {
+          for (const batch of syncBatches) {
+            const batchItems: ImportedMediaItem[] = [
+              ...(Array.isArray(batch.voiceoverTimings)
+                ? batch.voiceoverTimings.map((t: any) => t.media)
+                : []),
+              ...(Array.isArray(batch.visualTimings)
+                ? batch.visualTimings.map((t: any) => t.media)
+                : []),
+            ].filter(Boolean);
+
+            if (batchItems.length > 0) {
+              syncMediaItemsWithVoiceoverOnTimeline(
+                batchItems,
+                batch.clearTimeline !== false
+              );
+            }
+          }
+          return;
+        }
+
+        // If incoming items contain both images and audio, auto-sync them together
+        const hasAudio = incoming.some((m) => m.type === 'audio');
+        const hasImages = incoming.some((m) => m.type === 'image');
+        if (hasAudio && hasImages) {
+          syncMediaItemsWithVoiceoverOnTimeline(incoming, false);
+          return;
+        }
+
+        setProject((prev) => {
+          const addedClips: TimelineClip[] = [];
+          const updatedClips = [...prev.clips];
+
+          incoming.forEach((media) => {
+            const targetType = media.type === 'audio' ? 'audio' : 'video';
+            const track =
+              prev.tracks.find((t) => t.type === targetType && !t.locked) ||
+              prev.tracks[0];
+            const existingOnTrack = [...updatedClips, ...addedClips].filter(
+              (c) => c.trackId === track.id
+            );
+            const appendStart = existingOnTrack.reduce(
+              (max, c) => Math.max(max, Math.round((c.startTime + c.duration) * 100) / 100),
+              0
+            );
+
+            addedClips.push({
+              id: `clip_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+              trackId: track.id,
+              mediaId: media.id,
+              name: media.originalName,
+              type: media.type,
+              url: media.url,
+              filePath: media.filePath,
+              thumbnailUrl: media.thumbnailUrl,
+              startTime: appendStart,
+              duration: media.duration,
+              trimStart: 0,
+              sourceDuration: media.duration,
+              positionX: 0,
+              positionY: 0,
+              scaleX: 100,
+              scaleY: 100,
+              rotation: 0,
+              flipH: false,
+              flipV: false,
+              anchorX: 50,
+              anchorY: 50,
+              opacity: 100,
+              blendMode: 'normal',
+              cropTop: 0,
+              cropBottom: 0,
+              cropLeft: 0,
+              cropRight: 0,
+              speed: 1,
+              reversed: false,
+              volume: 100,
+              muted: false,
+              fadeIn: 0,
+              fadeOut: 0,
+              pitch: 0,
+              noiseReduction: false,
+              peaks: media.peaks,
+              effects: [],
+              filterPreset: 'None',
+              transitionIn: { type: 'None', duration: 0.5 },
+              transitionOut: { type: 'None', duration: 0.5 },
+              animationIn: 'None',
+              animationOut: 'None',
+              adjustments: { ...DEFAULT_ADJUSTMENTS },
+              keyframes: [],
+            });
+          });
+
+          if (addedClips.length > 0) {
+            setSelectedClipIds([addedClips[addedClips.length - 1].id]);
+          }
+
+          return {
+            ...prev,
+            clips: [...updatedClips, ...addedClips],
+          };
+        });
+
+        setStatusBanner({
+          type: 'success',
+          message: `Auto-Import (.BAT): Automatically imported ${incoming.length} file(s) onto the Timeline!`,
+        });
+      } catch {
+        // ignore poll errors
+      }
+    }, 2500);
+    return () => window.clearInterval(pollTimer);
+  }, [syncMediaItemsWithVoiceoverOnTimeline]);
 
   // Import Project File (.hveproject or .json) from user disk
   const handleImportProjectFile = useCallback(
@@ -2707,6 +3029,57 @@ export default function App() {
         }}
       />
 
+      {/* Hidden Folder Picker for Auto-Syncing a Folder of Images + Voiceover onto Timeline */}
+      <input
+        ref={autoSyncFolderInputRef}
+        type="file"
+        multiple
+        {...({ webkitdirectory: '', directory: '' } as any)}
+        className="hidden"
+        onChange={async (e) => {
+          const list = e.target.files;
+          if (!list || list.length === 0) return;
+          const rawFiles = Array.from(list).filter((f) => {
+            const ext = (f.name.split('.').pop() || '').toLowerCase();
+            return [
+              'png', 'jpg', 'jpeg', 'webp', 'gif', 'bmp',
+              'mp3', 'wav', 'm4a', 'aac', 'flac', 'ogg',
+              'mp4', 'mov', 'mkv', 'avi', 'webm',
+            ].includes(ext);
+          });
+          e.target.value = '';
+          if (rawFiles.length === 0) {
+            setStatusBanner({
+              type: 'error',
+              message: 'Selected folder does not contain any supported Images (.jpg/.png) or Voiceover (.mp3/.wav) files.',
+            });
+            return;
+          }
+          setStatusBanner({
+            type: 'info',
+            message: `Auto-Syncing folder (${rawFiles.length} files): Probing Voiceover & Images...`,
+          });
+          const probedItems: ImportedMediaItem[] = [];
+          for (const file of rawFiles) {
+            try {
+              const item = await probeMediaFileInBrowser(file);
+              probedItems.push(item);
+            } catch {
+              // ignore unsupported file
+            }
+          }
+          if (probedItems.length > 0) {
+            setMediaItems((prev) => [...probedItems, ...prev]);
+            fetch('/api/media/register-local', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ items: probedItems }),
+            }).catch(() => {});
+            syncMediaItemsWithVoiceoverOnTimeline(probedItems, true);
+          }
+        }}
+      />
+
       {/* TOP BAR (Strict 3-zone contract) */}
       <header className="h-11 px-4 bg-[#0F172A] border-b border-slate-800 flex items-center justify-between shrink-0 select-none">
         {/* Zone 1: Brand Title */}
@@ -2952,7 +3325,38 @@ export default function App() {
             <span>Save</span>
           </button>
           <button
-            onClick={() => setShowSettingsModal(true)}
+            onClick={() => autoSyncFolderInputRef.current?.click()}
+            className="px-2 py-1 text-xs font-medium text-fuchsia-300 hover:text-white bg-fuchsia-500/10 hover:bg-fuchsia-500/20 border border-fuchsia-500/30 rounded flex items-center gap-1 transition-colors whitespace-nowrap"
+            title="Select a Folder with Images + Voiceover to Auto-Sync on Timeline"
+          >
+            <FolderOpen className="w-3 h-3 text-fuchsia-400" />
+            <span>Sync Folder (Images+VO)</span>
+          </button>
+          <a
+            href="/api/automation/download-bat"
+            download="auto_import.bat"
+            className="px-2 py-1 text-xs font-medium text-amber-300 hover:text-white bg-amber-500/10 hover:bg-amber-500/20 border border-amber-500/30 rounded flex items-center gap-1 transition-colors whitespace-nowrap"
+            title="Download auto_import.bat: Double-click on Windows to select a folder of Images + Voiceover and auto-sync on Timeline"
+          >
+            <Download className="w-3 h-3 text-amber-400" />
+            <span>Auto Import .BAT</span>
+          </a>
+          <button
+            onClick={() => {
+              setSettingsInitialTab('Installer (.EXE)');
+              setShowSettingsModal(true);
+            }}
+            className="px-2 py-1 text-xs font-medium text-emerald-300 hover:text-white bg-emerald-500/10 hover:bg-emerald-500/20 border border-emerald-500/30 rounded flex items-center gap-1 transition-colors whitespace-nowrap"
+            title="Open Windows .EXE Setup Installer & Auto-Import (.BAT) Builder"
+          >
+            <Download className="w-3 h-3 text-emerald-400" />
+            <span>.EXE Setup</span>
+          </button>
+          <button
+            onClick={() => {
+              setSettingsInitialTab('General');
+              setShowSettingsModal(true);
+            }}
             className="p-1.5 text-slate-300 hover:text-white hover:bg-slate-800 rounded transition-colors"
             title="Settings & Diagnostics"
           >
@@ -3025,6 +3429,8 @@ export default function App() {
         onClose={() => setShowSettingsModal(false)}
         autoSaveIntervalSec={autoSaveIntervalSec}
         setAutoSaveIntervalSec={setAutoSaveIntervalSec}
+        initialTab={settingsInitialTab}
+        onTriggerFolderAutoSync={() => autoSyncFolderInputRef.current?.click()}
       />
 
       <WelcomeAndProjectModal

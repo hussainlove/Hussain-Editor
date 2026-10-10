@@ -21,7 +21,6 @@ AppPublisher={#MyAppPublisher}
 DefaultDirName={autopf}\{#MyAppName}
 DefaultGroupName={#MyAppName}
 DisableProgramGroupPage=yes
-; Install without requiring Administrator privileges unless explicitly overridden
 PrivilegesRequired=lowest
 PrivilegesRequiredOverridesAllowed=dialog
 OutputDir=dist_installer
@@ -38,7 +37,7 @@ UninstallDisplayIcon={app}\{#MyAppExeName}
 Name: "english"; MessagesFile: "compiler:Default.isl"
 
 [Tasks]
-Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"; Flags: unchecked
+Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"
 
 [Dirs]
 Name: "{userappdata}\{#MyAppName}\projects"
@@ -48,16 +47,22 @@ Name: "{userappdata}\{#MyAppName}\cache\waveforms"
 Name: "{userappdata}\{#MyAppName}\cache\proxies"
 Name: "{userappdata}\{#MyAppName}\cache\exports"
 Name: "{userappdata}\{#MyAppName}\logs"
+Name: "{app}\auto_import"
+Name: "{app}\auto_import\imported"
 
 [Files]
-; Core PyInstaller / Electron standalone bundle
 Source: "..\dist\HussainVideoEditor\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
-; Bundled FFmpeg & FFprobe static binaries (Zero external dependency requirement)
-Source: "..\ffmpeg\bin\ffmpeg.exe"; DestDir: "{app}\ffmpeg\bin"; Flags: ignoreversion
-Source: "..\ffmpeg\bin\ffprobe.exe"; DestDir: "{app}\ffmpeg\bin"; Flags: ignoreversion
+Source: "..\auto_import.bat"; DestDir: "{app}"; Flags: ignoreversion
+Source: "..\package.json"; DestDir: "{app}"; Flags: ignoreversion
+Source: "..\server.ts"; DestDir: "{app}"; Flags: ignoreversion
+Source: "..\index.html"; DestDir: "{app}"; Flags: ignoreversion
+Source: "..\vite.config.ts"; DestDir: "{app}"; Flags: ignoreversion
+Source: "..\tsconfig.json"; DestDir: "{app}"; Flags: ignoreversion
+Source: "..\src\*"; DestDir: "{app}\src"; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "..\ffmpeg\bin\ffmpeg.exe"; DestDir: "{app}\ffmpeg\bin"; Flags: ignoreversion skipifsourcedoesntexist
+Source: "..\ffmpeg\bin\ffprobe.exe"; DestDir: "{app}\ffmpeg\bin"; Flags: ignoreversion skipifsourcedoesntexist
 
 [Registry]
-; Register .hveproject file extension
 Root: HKA; Subkey: "Software\Classes\{#MyAppAssocExt}\OpenWithProgids"; ValueType: string; ValueName: "{#MyAppAssocKey}"; ValueData: ""; Flags: uninsdeletevalue
 Root: HKA; Subkey: "Software\Classes\{#MyAppAssocKey}"; ValueType: string; ValueName: ""; ValueData: "{#MyAppAssocName}"; Flags: uninsdeletekey
 Root: HKA; Subkey: "Software\Classes\{#MyAppAssocKey}\DefaultIcon"; ValueType: string; ValueName: ""; ValueData: "{app}\{#MyAppExeName},0"
@@ -67,6 +72,7 @@ Root: HKA; Subkey: "Software\Classes\Applications\{#MyAppExeName}\SupportedTypes
 [Icons]
 Name: "{autoprograms}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"
 Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Tasks: desktopicon
+Name: "{autodesktop}\{#MyAppName} - Auto Import (.BAT)"; Filename: "{app}\auto_import.bat"; Tasks: desktopicon
 
 [Run]
 Filename: "{app}\{#MyAppExeName}"; Description: "{cm:LaunchProgram,{#StringChange(MyAppName, '&', '&&')}}"; Flags: nowait postinstall skipifsilent

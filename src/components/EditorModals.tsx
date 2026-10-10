@@ -911,6 +911,8 @@ interface SettingsModalProps {
   onClose: () => void;
   autoSaveIntervalSec: number;
   setAutoSaveIntervalSec: (s: number) => void;
+  initialTab?: 'General' | 'Installer (.EXE)' | 'Performance' | 'Cache' | 'Shortcuts' | 'Logs';
+  onTriggerFolderAutoSync?: () => void;
 }
 
 export const SettingsModal: React.FC<SettingsModalProps> = ({
@@ -918,11 +920,20 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   onClose,
   autoSaveIntervalSec,
   setAutoSaveIntervalSec,
+  initialTab = 'Installer (.EXE)',
+  onTriggerFolderAutoSync,
 }) => {
-  const [activeTab, setActiveTab] = useState<'General' | 'Performance' | 'Cache' | 'Shortcuts' | 'Logs'>('General');
+  const [activeTab, setActiveTab] = useState<'General' | 'Installer (.EXE)' | 'Performance' | 'Cache' | 'Shortcuts' | 'Logs'>(initialTab);
   const [sysInfo, setSysInfo] = useState<any>(null);
   const [logsText, setLogsText] = useState('');
   const [logType, setLogType] = useState<'app' | 'ffmpeg'>('app');
+  const [folderSyncStatus, setFolderSyncStatus] = useState<string>('');
+
+  useEffect(() => {
+    if (isOpen && initialTab) {
+      setActiveTab(initialTab);
+    }
+  }, [isOpen, initialTab]);
 
   const fetchDiagnostics = async () => {
     try {
@@ -961,17 +972,17 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
         <div className="px-5 py-3.5 border-b border-slate-800 flex items-center justify-between">
           <div className="flex items-center gap-2">
             <Settings className="w-4 h-4 text-sky-400" />
-            <h2 className="text-sm font-semibold text-slate-100">Application Settings & Hardware Diagnostics</h2>
+            <h2 className="text-sm font-semibold text-slate-100">Application Settings, .EXE Setup & Auto-Import</h2>
           </div>
           <button onClick={onClose} className="text-slate-400 hover:text-slate-200">
             <X className="w-4 h-4" />
           </button>
         </div>
 
-        <div className="flex h-96">
+        <div className="flex h-[420px]">
           {/* Left Settings Tabs */}
           <div className="w-44 bg-[#090D16] border-r border-slate-800 p-2 space-y-1">
-            {(['General', 'Performance', 'Cache', 'Shortcuts', 'Logs'] as const).map((tab) => (
+            {(['General', 'Installer (.EXE)', 'Performance', 'Cache', 'Shortcuts', 'Logs'] as const).map((tab) => (
               <button
                 key={tab}
                 onClick={() => setActiveTab(tab)}
@@ -1006,6 +1017,115 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                   <p className="text-slate-400 text-[11px]">
                     Hussain Video Editor operates 100% locally. Media files, voiceovers, and project data never leave your machine and zero hidden telemetry is collected.
                   </p>
+                </div>
+              </div>
+            )}
+
+            {activeTab === 'Installer (.EXE)' && (
+              <div className="space-y-3.5">
+                <div className="bg-slate-900 border border-amber-500/40 rounded-md p-3.5 space-y-2.5">
+                  <div>
+                    <p className="font-semibold text-slate-100 text-xs">
+                      1. Auto-Import & Images + Voiceover Timeline Sync (<code className="text-amber-400">auto_import.bat</code>)
+                    </p>
+                    <p className="text-[11px] text-slate-400">
+                      Double-click <code className="text-amber-300">auto_import.bat</code> to open CMD, enter or browse a folder containing your <span className="text-slate-200">Images + Voiceover</span>, and automatically sync all images across the exact Voiceover length on the Timeline!
+                    </p>
+                  </div>
+                  <div className="flex flex-wrap gap-2">
+                    <a
+                      href="/api/automation/download-bat"
+                      download="auto_import.bat"
+                      className="flex-1 py-2 px-3 bg-amber-500 hover:bg-amber-400 text-slate-950 font-semibold rounded text-xs flex items-center justify-center gap-1.5 transition-colors"
+                    >
+                      <Download className="w-3.5 h-3.5" />
+                      Download auto_import.bat
+                    </a>
+                    {onTriggerFolderAutoSync && (
+                      <button
+                        onClick={() => {
+                          onClose();
+                          onTriggerFolderAutoSync();
+                        }}
+                        className="flex-1 py-2 px-3 bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-semibold rounded text-xs transition-colors"
+                      >
+                        Select Folder Now (Auto-Sync Images + VO)
+                      </button>
+                    )}
+                    <button
+                      onClick={async () => {
+                        setFolderSyncStatus('Scanning auto_import\\ folder...');
+                        const res = await fetch('/api/automation/scan-folder', {
+                          method: 'POST',
+                          headers: { 'Content-Type': 'application/json' },
+                          body: JSON.stringify({ autoTimeline: true, autoSyncVoiceover: true }),
+                        });
+                        if (res.ok) {
+                          const data = await res.json();
+                          setFolderSyncStatus(
+                            data.importedCount > 0
+                              ? `Synced ${data.importedCount} file(s) onto Timeline!`
+                              : 'No new files in auto_import\\ folder yet.'
+                          );
+                        }
+                      }}
+                      className="py-2 px-3 bg-slate-800 hover:bg-slate-700 text-amber-300 border border-amber-500/30 font-medium rounded text-xs transition-colors"
+                    >
+                      Scan auto_import\
+                    </button>
+                  </div>
+                  {folderSyncStatus && (
+                    <p className="text-[11px] text-emerald-400 font-medium">{folderSyncStatus}</p>
+                  )}
+                </div>
+
+                <div className="bg-slate-900 border border-sky-500/40 rounded-md p-3.5 space-y-2.5">
+                  <div>
+                    <p className="font-semibold text-slate-100 text-xs">
+                      2. Complete Windows 10/11 .EXE Setup Package (<code className="text-sky-400">HussainVideoEditor-Setup.exe</code>)
+                    </p>
+                    <p className="text-[11px] text-slate-400">
+                      Includes the <span className="text-slate-200 font-medium">entire app source + native Windows .NET C# compiler scripts</span> (<code className="text-emerald-300">HussainLauncher.cs</code> & <code className="text-emerald-300">HussainSetupWizard.cs</code>) so <code className="text-sky-300">build_windows_installer.bat</code> builds <code className="text-emerald-400">HussainVideoEditor.exe</code> and <code className="text-emerald-400">HussainVideoEditor-Setup.exe</code> on any Windows PC—even without Python or Inno Setup!
+                    </p>
+                  </div>
+                  <div className="flex flex-wrap gap-2">
+                    <a
+                      href="/api/installer/bundle"
+                      download="HussainVideoEditor-Windows-Installer-SDK.zip"
+                      className="flex-1 py-2 px-3 bg-sky-500 hover:bg-sky-400 text-slate-950 font-semibold rounded text-xs flex items-center justify-center gap-2 transition-colors"
+                    >
+                      <Download className="w-3.5 h-3.5" />
+                      Download Complete Windows .EXE Setup Bundle (.ZIP)
+                    </a>
+                    <a
+                      href="/api/installer/download-builder-bat"
+                      download="build_windows_installer.bat"
+                      className="py-2 px-3 bg-slate-800 hover:bg-slate-700 text-sky-300 border border-sky-500/30 font-medium rounded text-xs flex items-center gap-1.5 transition-colors"
+                    >
+                      <Download className="w-3.5 h-3.5" />
+                      build_windows_installer.bat
+                    </a>
+                  </div>
+                </div>
+
+                <div className="bg-slate-900 border border-slate-800 rounded-md p-3.5 space-y-2">
+                  <p className="font-semibold text-slate-200 text-xs">How to Build & Install .EXE on Windows (Fixed & Zero-Dependency):</p>
+                  <ol className="list-decimal list-inside space-y-1.5 text-[11px] text-slate-300">
+                    <li>
+                      <span className="font-semibold text-sky-400">Extract the Complete Bundle:</span> Click <span className="text-slate-100">Download Complete Windows .EXE Setup Bundle (.ZIP)</span> above and extract it to a folder on your Windows 10/11 PC.
+                    </li>
+                    <li>
+                      <span className="font-semibold text-sky-400">Double-Click Builder:</span> Double-click <code className="text-emerald-400">build_windows_installer.bat</code> (in the root or <code className="text-emerald-400">installer\</code> folder).
+                    </li>
+                    <li>
+                      <span className="font-semibold text-sky-400">Automatic Native Compilation:</span> It uses Windows' built-in <code className="text-amber-300">csc.exe</code> (.NET Framework) or Inno Setup 6 to immediately generate:
+                      <ul className="list-disc list-inside pl-4 mt-1 text-slate-400 space-y-0.5 font-mono text-[10px]">
+                        <li>Standalone App: <span className="text-slate-200">HussainVideoEditor.exe</span></li>
+                        <li>Setup Installer: <span className="text-emerald-400">installer\dist_installer\HussainVideoEditor-Setup.exe</span></li>
+                        <li>Auto-Sync BAT: <span className="text-amber-300">auto_import.bat</span></li>
+                      </ul>
+                    </li>
+                  </ol>
                 </div>
               </div>
             )}
