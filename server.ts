@@ -3,8 +3,7 @@ import multer from 'multer';
 import path from 'path';
 import fs from 'fs';
 import os from 'os';
-import * as archiverModule from 'archiver';
-const archiver = (archiverModule as any).default || archiverModule;
+import { ZipArchive } from 'archiver';
 import { execFile } from 'child_process';
 import util from 'util';
 import { GoogleGenAI, Type } from '@google/genai';
@@ -1111,46 +1110,61 @@ export async function createAppServer() {
   });
 
   // Download Complete Self-Contained Windows Installer & App Package Bundle (.zip)
-  app.get('/api/installer/bundle', (_req, res) => {
-    res.setHeader('Content-Type', 'application/zip');
-    res.setHeader('Content-Disposition', 'attachment; filename="HussainVideoEditor-Windows-Installer-SDK.zip"');
+  app.get('/api/installer/bundle', async (_req, res) => {
+    try {
+      res.setHeader('Content-Type', 'application/zip');
+      res.setHeader('Content-Disposition', 'attachment; filename="HussainVideoEditor-Windows-Installer-SDK.zip"');
 
-    const archive = archiver('zip', { zlib: { level: 9 } });
-    archive.pipe(res);
+      const archive = new ZipArchive({ zlib: { level: 9 } });
 
-    const rootFiles = [
-      'package.json',
-      'server.ts',
-      'index.html',
-      'vite.config.ts',
-      'tsconfig.json',
-      'metadata.json',
-      '.env.example',
-      'auto_import.bat',
-      'build_windows_installer.bat',
-    ];
+      archive.on('error', (err: any) => {
+        logApp('ERROR', 'InstallerBundle', 'Zip creation failed', err?.message);
+        if (!res.headersSent) {
+          res.status(500).json({ error: 'Failed packaging installer bundle', details: err?.message });
+        }
+      });
 
-    for (const fileName of rootFiles) {
-      const fullPath = path.resolve(process.cwd(), fileName);
-      if (fs.existsSync(fullPath)) {
-        archive.file(fullPath, { name: fileName });
+      archive.pipe(res);
+
+      const rootFiles = [
+        'package.json',
+        'server.ts',
+        'index.html',
+        'vite.config.ts',
+        'tsconfig.json',
+        'metadata.json',
+        '.env.example',
+        'auto_import.bat',
+        'build_windows_installer.bat',
+      ];
+
+      for (const fileName of rootFiles) {
+        const fullPath = path.resolve(process.cwd(), fileName);
+        if (fs.existsSync(fullPath)) {
+          archive.file(fullPath, { name: fileName });
+        }
+      }
+
+      const dirsToInclude = ['src', 'backend', 'engine', 'installer', 'docs'];
+      for (const dirName of dirsToInclude) {
+        const fullDir = path.resolve(process.cwd(), dirName);
+        if (fs.existsSync(fullDir)) {
+          archive.directory(fullDir, dirName);
+        }
+      }
+
+      const distDir = path.resolve(process.cwd(), 'dist');
+      if (fs.existsSync(distDir)) {
+        archive.directory(distDir, 'dist');
+      }
+
+      await archive.finalize();
+    } catch (err: any) {
+      logApp('ERROR', 'InstallerBundle', 'Error in installer bundle handler', err?.message);
+      if (!res.headersSent) {
+        res.status(500).json({ error: err?.message || 'Failed generating bundle' });
       }
     }
-
-    const dirsToInclude = ['src', 'installer', 'docs'];
-    for (const dirName of dirsToInclude) {
-      const fullDir = path.resolve(process.cwd(), dirName);
-      if (fs.existsSync(fullDir)) {
-        archive.directory(fullDir, dirName);
-      }
-    }
-
-    const distDir = path.resolve(process.cwd(), 'dist');
-    if (fs.existsSync(distDir)) {
-      archive.directory(distDir, 'dist');
-    }
-
-    archive.finalize();
   });
 
   // Download standalone build_windows_installer.bat directly with 1 click
@@ -1393,7 +1407,28 @@ async function startServer() {
 
   if (process.env.NODE_ENV !== 'production') {
     const vite = await createViteServer({
-      server: { middlewareMode: true },
+      server: {
+        middlewareMode: true,
+        watch: {
+          ignored: [
+            '**/cache/**',
+            '**/logs/**',
+            '**/projects/**',
+            '**/auto_import/**',
+            '**/installer/**',
+            '**/dist/**',
+            '**/*.log',
+            '**/*.tmp',
+            '**/.git/**',
+            '**/*.json',
+            '**/*.bat',
+            '**/*.iss',
+            '**/*.cs',
+            '**/*.py',
+            '**/server.ts',
+          ],
+        },
+      },
       appType: 'spa',
     });
     app.use(vite.middlewares);

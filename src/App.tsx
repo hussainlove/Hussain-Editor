@@ -460,8 +460,11 @@ export default function App() {
 
       setProject((prev) => {
         const videoTrack =
-          prev.tracks.find((t) => t.type === 'video' && !t.locked) || prev.tracks[0];
+          prev.tracks.find((t) => (t.id === 'track-v1' || t.name.includes('V1')) && !t.locked) ||
+          prev.tracks.find((t) => t.type === 'video' && !t.locked) ||
+          prev.tracks[0];
         const audioTrack =
+          prev.tracks.find((t) => (t.id === 'track-a1' || t.name.includes('AUDIO 1') || t.name.includes('A1')) && !t.locked) ||
           prev.tracks.find((t) => t.type === 'audio' && !t.locked) ||
           prev.tracks[prev.tracks.length - 1];
 

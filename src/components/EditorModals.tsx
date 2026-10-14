@@ -928,6 +928,36 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   const [logsText, setLogsText] = useState('');
   const [logType, setLogType] = useState<'app' | 'ffmpeg'>('app');
   const [folderSyncStatus, setFolderSyncStatus] = useState<string>('');
+  const [isDownloadingBundle, setIsDownloadingBundle] = useState(false);
+  const [downloadProgressMsg, setDownloadProgressMsg] = useState('');
+
+  const downloadFileViaBlob = async (endpoint: string, defaultFilename: string) => {
+    setIsDownloadingBundle(true);
+    setDownloadProgressMsg('Packaging & Generating ZIP...');
+    try {
+      const res = await fetch(endpoint);
+      if (!res.ok) {
+        throw new Error(`Server returned HTTP ${res.status}`);
+      }
+      setDownloadProgressMsg('Downloading file...');
+      const blob = await res.blob();
+      const blobUrl = window.URL.createObjectURL(blob);
+      const tempLink = document.createElement('a');
+      tempLink.href = blobUrl;
+      tempLink.download = defaultFilename;
+      document.body.appendChild(tempLink);
+      tempLink.click();
+      document.body.removeChild(tempLink);
+      setTimeout(() => window.URL.revokeObjectURL(blobUrl), 2000);
+      setDownloadProgressMsg('Download started successfully!');
+      setTimeout(() => setDownloadProgressMsg(''), 4000);
+    } catch (err: any) {
+      setDownloadProgressMsg(`Error: ${err?.message || 'Download failed'}`);
+      setTimeout(() => setDownloadProgressMsg(''), 5000);
+    } finally {
+      setIsDownloadingBundle(false);
+    }
+  };
 
   useEffect(() => {
     if (isOpen && initialTab) {
@@ -1033,21 +1063,23 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                     </p>
                   </div>
                   <div className="flex flex-wrap gap-2">
-                    <a
-                      href="/api/automation/download-bat"
-                      download="auto_import.bat"
-                      className="flex-1 py-2 px-3 bg-amber-500 hover:bg-amber-400 text-slate-950 font-semibold rounded text-xs flex items-center justify-center gap-1.5 transition-colors"
+                    <button
+                      type="button"
+                      onClick={() =>
+                        downloadFileViaBlob('/api/automation/download-bat', 'auto_import.bat')
+                      }
+                      className="flex-1 py-2 px-3 bg-amber-500 hover:bg-amber-400 text-slate-950 font-semibold rounded text-xs flex items-center justify-center gap-1.5 transition-colors cursor-pointer"
                     >
                       <Download className="w-3.5 h-3.5" />
                       Download auto_import.bat
-                    </a>
+                    </button>
                     {onTriggerFolderAutoSync && (
                       <button
                         onClick={() => {
                           onClose();
                           onTriggerFolderAutoSync();
                         }}
-                        className="flex-1 py-2 px-3 bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-semibold rounded text-xs transition-colors"
+                        className="flex-1 py-2 px-3 bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-semibold rounded text-xs transition-colors cursor-pointer"
                       >
                         Select Folder Now (Auto-Sync Images + VO)
                       </button>
@@ -1069,7 +1101,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                           );
                         }
                       }}
-                      className="py-2 px-3 bg-slate-800 hover:bg-slate-700 text-amber-300 border border-amber-500/30 font-medium rounded text-xs transition-colors"
+                      className="py-2 px-3 bg-slate-800 hover:bg-slate-700 text-amber-300 border border-amber-500/30 font-medium rounded text-xs transition-colors cursor-pointer"
                     >
                       Scan auto_import\
                     </button>
@@ -1089,23 +1121,41 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                     </p>
                   </div>
                   <div className="flex flex-wrap gap-2">
-                    <a
-                      href="/api/installer/bundle"
-                      download="HussainVideoEditor-Windows-Installer-SDK.zip"
-                      className="flex-1 py-2 px-3 bg-sky-500 hover:bg-sky-400 text-slate-950 font-semibold rounded text-xs flex items-center justify-center gap-2 transition-colors"
+                    <button
+                      type="button"
+                      disabled={isDownloadingBundle}
+                      onClick={() =>
+                        downloadFileViaBlob(
+                          '/api/installer/bundle',
+                          'HussainVideoEditor-Windows-Installer-SDK.zip'
+                        )
+                      }
+                      className="flex-1 py-2 px-3 bg-sky-500 hover:bg-sky-400 disabled:opacity-50 text-slate-950 font-semibold rounded text-xs flex items-center justify-center gap-2 transition-colors cursor-pointer shadow"
                     >
-                      <Download className="w-3.5 h-3.5" />
-                      Download Complete Windows .EXE Setup Bundle (.ZIP)
-                    </a>
-                    <a
-                      href="/api/installer/download-builder-bat"
-                      download="build_windows_installer.bat"
-                      className="py-2 px-3 bg-slate-800 hover:bg-slate-700 text-sky-300 border border-sky-500/30 font-medium rounded text-xs flex items-center gap-1.5 transition-colors"
+                      <Download className={`w-3.5 h-3.5 ${isDownloadingBundle ? 'animate-bounce' : ''}`} />
+                      {isDownloadingBundle
+                        ? downloadProgressMsg || 'Packaging ZIP...'
+                        : 'Download Complete Windows .EXE Setup Bundle (.ZIP)'}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() =>
+                        downloadFileViaBlob(
+                          '/api/installer/download-builder-bat',
+                          'build_windows_installer.bat'
+                        )
+                      }
+                      className="py-2 px-3 bg-slate-800 hover:bg-slate-700 text-sky-300 border border-sky-500/30 font-medium rounded text-xs flex items-center gap-1.5 transition-colors cursor-pointer"
                     >
                       <Download className="w-3.5 h-3.5" />
                       build_windows_installer.bat
-                    </a>
+                    </button>
                   </div>
+                  {downloadProgressMsg && (
+                    <p className="text-[11px] text-sky-400 font-medium animate-pulse">
+                      {downloadProgressMsg}
+                    </p>
+                  )}
                 </div>
 
                 <div className="bg-slate-900 border border-slate-800 rounded-md p-3.5 space-y-2">
